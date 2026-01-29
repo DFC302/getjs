@@ -15,9 +15,14 @@ class JSCollector {
       userAgent: options.userAgent || null,
       proxy: options.proxy || null,
       verbose: options.verbose || false,
+      cookies: options.cookies || null,        // Cookie file path or array
+      localStorage: options.localStorage || null, // LocalStorage key-value pairs
+      headers: options.headers || {},          // Extra HTTP headers
     };
 
     this.jsUrls = new Set();
+    this.wsJsUrls = new Set();  // WebSocket-discovered JS
+    this.swScripts = new Set(); // Service Worker scripts
     this.browser = null;
     this.context = null;
     this.page = null;
@@ -132,11 +137,76 @@ class JSCollector {
       contextOptions.userAgent = this.options.userAgent;
     }
 
+    // Add extra HTTP headers
+    if (Object.keys(this.options.headers).length > 0) {
+      contextOptions.extraHTTPHeaders = this.options.headers;
+    }
+
     this.context = await this.browser.newContext(contextOptions);
+
+    // Load cookies if provided
+    if (this.options.cookies) {
+      await this.loadCookies();
+    }
+
     this.page = await this.context.newPage();
+
+    // Set localStorage if provided
+    if (this.options.localStorage) {
+      await this.setupLocalStorage();
+    }
 
     // Set default timeout
     this.page.setDefaultTimeout(this.options.timeout);
+  }
+
+  async loadCookies() {
+    let cookies = this.options.cookies;
+
+    // If cookies is a file path, read it
+    if (typeof cookies === 'string') {
+      try {
+        const cookieData = fs.readFileSync(cookies, 'utf8');
+        cookies = JSON.parse(cookieData);
+        this.log(`Loaded ${cookies.length} cookies from file`);
+      } catch (e) {
+        this.log(`Failed to load cookies from file: ${e.message}`);
+        return;
+      }
+    }
+
+    // Normalize cookie format (support both Playwright and Netscape formats)
+    const normalizedCookies = cookies.map(cookie => {
+      // Handle Netscape/curl format
+      if (cookie.HttpOnly !== undefined) {
+        return {
+          name: cookie.Name || cookie.name,
+          value: cookie.Value || cookie.value,
+          domain: cookie.Domain || cookie.domain,
+          path: cookie.Path || cookie.path || '/',
+          expires: cookie.Expires ? new Date(cookie.Expires).getTime() / 1000 : -1,
+          httpOnly: cookie.HttpOnly === 'true' || cookie.HttpOnly === true,
+          secure: cookie.Secure === 'true' || cookie.Secure === true,
+          sameSite: cookie.SameSite || 'Lax',
+        };
+      }
+      return cookie;
+    });
+
+    await this.context.addCookies(normalizedCookies);
+    this.log(`Added ${normalizedCookies.length} cookies to browser context`);
+  }
+
+  async setupLocalStorage() {
+    // localStorage must be set after navigating to the domain
+    // We'll inject it via addInitScript
+    const storageData = this.options.localStorage;
+    await this.context.addInitScript((data) => {
+      for (const [key, value] of Object.entries(data)) {
+        localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value));
+      }
+    }, storageData);
+    this.log(`Configured ${Object.keys(storageData).length} localStorage entries`);
   }
 
   async setupInterceptors(targetUrl) {
@@ -161,8 +231,50 @@ class JSCollector {
             this.log(`Found JS: ${normalizedUrl}`);
           }
         }
+
+        // Detect Service Worker registrations
+        if (url.includes('service-worker') || url.includes('sw.js') ||
+            contentType.includes('javascript')) {
+          try {
+            const body = await response.text();
+            if (body.includes('self.addEventListener') || body.includes('ServiceWorkerGlobalScope')) {
+              const normalizedUrl = this.normalizeUrl(url, targetUrl);
+              if (normalizedUrl) {
+                this.swScripts.add(normalizedUrl);
+                this.jsUrls.add(normalizedUrl);
+                this.log(`Found Service Worker: ${normalizedUrl}`);
+              }
+            }
+          } catch (e) {
+            // Body may not be available
+          }
+        }
       } catch (e) {
         // Response may have been disposed
+      }
+    });
+
+    // Monitor WebSocket frames for JS URLs
+    const cdpSession = await this.context.newCDPSession(this.page);
+    await cdpSession.send('Network.enable');
+
+    cdpSession.on('Network.webSocketFrameReceived', (params) => {
+      try {
+        const payload = params.response.payloadData;
+        // Look for JS URLs in WebSocket messages
+        const urlMatches = payload.match(/https?:\/\/[^\s"'<>]+\.js[^\s"'<>]*/gi);
+        if (urlMatches) {
+          for (const match of urlMatches) {
+            const normalizedUrl = this.normalizeUrl(match, targetUrl);
+            if (normalizedUrl && this.isJavaScriptUrl(normalizedUrl)) {
+              this.wsJsUrls.add(normalizedUrl);
+              this.jsUrls.add(normalizedUrl);
+              this.log(`Found JS via WebSocket: ${normalizedUrl}`);
+            }
+          }
+        }
+      } catch (e) {
+        // Invalid payload
       }
     });
 
@@ -308,6 +420,61 @@ class JSCollector {
     }
   }
 
+  async extractServiceWorkers(targetUrl) {
+    this.log('Checking for Service Worker registrations...');
+
+    // Extract SW registration URLs from scripts
+    const swUrls = await this.page.evaluate(() => {
+      const urls = [];
+
+      // Check all scripts for navigator.serviceWorker.register calls
+      const scripts = document.querySelectorAll('script');
+      scripts.forEach((script) => {
+        const content = script.textContent;
+        // Match serviceWorker.register('url') patterns
+        const swRegex = /serviceWorker\.register\s*\(\s*['"]([^'"]+)['"]/g;
+        let match;
+        while ((match = swRegex.exec(content)) !== null) {
+          urls.push(match[1]);
+        }
+      });
+
+      return urls;
+    });
+
+    for (const url of swUrls) {
+      const normalizedUrl = this.normalizeUrl(url, targetUrl);
+      if (normalizedUrl) {
+        this.swScripts.add(normalizedUrl);
+        this.jsUrls.add(normalizedUrl);
+        this.log(`Found Service Worker registration: ${normalizedUrl}`);
+      }
+    }
+
+    // Also check for registered service workers via CDP
+    try {
+      const cdpSession = await this.context.newCDPSession(this.page);
+      await cdpSession.send('ServiceWorker.enable');
+
+      // Give time for SW to register
+      await this.page.waitForTimeout(1000);
+
+      const { versions } = await cdpSession.send('ServiceWorker.getVersions') || { versions: [] };
+      for (const version of versions || []) {
+        if (version.scriptURL) {
+          const normalizedUrl = this.normalizeUrl(version.scriptURL, targetUrl);
+          if (normalizedUrl) {
+            this.swScripts.add(normalizedUrl);
+            this.jsUrls.add(normalizedUrl);
+            this.log(`Found registered Service Worker: ${normalizedUrl}`);
+          }
+        }
+      }
+    } catch (e) {
+      this.log(`Service Worker CDP check failed: ${e.message}`);
+    }
+  }
+
   async collect(targetUrl) {
     this.log(`Starting collection for: ${targetUrl}`);
 
@@ -365,6 +532,9 @@ class JSCollector {
 
       // Extract module imports
       await this.extractInlineModules(targetUrl);
+
+      // Extract Service Workers
+      await this.extractServiceWorkers(targetUrl);
 
       // Final wait for any remaining async operations
       this.log('Final wait for async operations...');

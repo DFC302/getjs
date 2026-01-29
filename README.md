@@ -12,6 +12,12 @@ A production-grade JavaScript URL extractor for security researchers. Loads web 
   - `import()` dynamic imports
   - XHR/fetch loaded scripts
   - Lazy-loaded scripts triggered by scrolling
+  - **WebSocket messages** (monitors for JS URLs in WS traffic)
+  - **Service Workers** (detects SW registrations and scripts)
+- **Authentication Support** - Access protected pages via:
+  - Cookie injection (JSON file)
+  - Custom HTTP headers (Authorization, API keys)
+  - localStorage injection (for client-side tokens)
 - **Smart URL Normalization** - Deduplicates and normalizes all discovered URLs
 - **Download Mode** - Fetch all discovered JS files or a specific one
 - **Proxy Support** - Route traffic through Burp Suite or other proxies
@@ -133,6 +139,9 @@ getjs -u <url> [options]
 | `--no-scroll` | Disable automatic scrolling | - |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
+| `-c, --cookies <file>` | Cookie file (JSON format) | - |
+| `-H, --header <header...>` | Extra HTTP headers | - |
+| `--local-storage <entry...>` | Set localStorage entries | - |
 | `--fetch-all` | Download all discovered JS files | - |
 | `--fetch-one <url>` | Download a specific JS file | - |
 | `-d, --download-dir <dir>` | Directory for downloads | ./js-downloads |
@@ -168,6 +177,43 @@ cat target-js.txt
 # Route through Burp for inspection
 getjs -u https://target.com -x http://127.0.0.1:8080 -o js-urls.txt
 ```
+
+### Authenticated Scanning
+
+For login-protected pages, you can inject cookies, headers, or localStorage:
+
+```bash
+# Using a cookie file (export from browser DevTools or EditThisCookie)
+getjs -u https://target.com/dashboard -c cookies.json -v
+
+# Using HTTP headers (e.g., Authorization token)
+getjs -u https://target.com/api -H "Authorization: Bearer eyJ..." -H "X-API-Key: abc123"
+
+# Using localStorage (for JWT tokens stored client-side)
+getjs -u https://target.com --local-storage "token=eyJ..." --local-storage "userId=123"
+
+# Combined: cookies + custom headers
+getjs -u https://target.com/admin -c session.json -H "X-CSRF-Token: xyz"
+```
+
+**Cookie file format (Playwright style):**
+```json
+[
+  {
+    "name": "session_id",
+    "value": "abc123",
+    "domain": "target.com",
+    "path": "/",
+    "httpOnly": true,
+    "secure": true
+  }
+]
+```
+
+**Exporting cookies from browser:**
+1. Open DevTools → Application → Cookies
+2. Use browser extension like "EditThisCookie" to export as JSON
+3. Or use: `document.cookie` in console and format manually
 
 ### Download for Offline Analysis
 
@@ -283,20 +329,20 @@ main().catch(console.error);
 
 ## Limitations
 
-- **Authentication** - Does not handle login-protected pages (use cookies/proxy)
-- **CAPTCHAs** - Cannot bypass CAPTCHA challenges
-- **Heavily Obfuscated Loaders** - Some custom loaders may evade detection
-- **WebSocket-loaded JS** - JS loaded via WebSocket is not captured
-- **Service Workers** - Scripts installed by service workers may not be captured
+- **CAPTCHAs** - Cannot bypass CAPTCHA challenges automatically
+- **Heavily Obfuscated Loaders** - Custom loaders using eval() or complex string manipulation may evade detection
+- **Encrypted WebSocket Payloads** - If JS URLs are encrypted in WS messages, they won't be detected
+- **iframe Isolation** - Scripts in cross-origin iframes may not be captured
 
 ## Future Improvements
 
-- [ ] Cookie injection support for authenticated sessions
+- [x] ~~Cookie injection support for authenticated sessions~~ ✅ Implemented
+- [x] ~~WebSocket traffic monitoring~~ ✅ Implemented
+- [x] ~~Service worker script extraction~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Source map discovery and parsing
-- [ ] Concurrent URL collection
-- [ ] WebSocket traffic monitoring
-- [ ] Service worker script extraction
+- [ ] Concurrent multi-URL collection
+- [ ] Cross-origin iframe script extraction
 - [ ] Integration with waybackurls for historical JS discovery
 
 ## License

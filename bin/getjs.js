@@ -38,8 +38,41 @@ function validateUrl(url) {
   }
 }
 
+function parseHeaders(headerStrings) {
+  const headers = {};
+  if (!headerStrings) return headers;
+
+  for (const h of headerStrings) {
+    const colonIndex = h.indexOf(':');
+    if (colonIndex > 0) {
+      const key = h.substring(0, colonIndex).trim();
+      const value = h.substring(colonIndex + 1).trim();
+      headers[key] = value;
+    }
+  }
+  return headers;
+}
+
+function parseLocalStorage(storageStrings) {
+  const storage = {};
+  if (!storageStrings) return null;
+
+  for (const s of storageStrings) {
+    const eqIndex = s.indexOf('=');
+    if (eqIndex > 0) {
+      const key = s.substring(0, eqIndex);
+      const value = s.substring(eqIndex + 1);
+      storage[key] = value;
+    }
+  }
+  return Object.keys(storage).length > 0 ? storage : null;
+}
+
 async function collectJS(options) {
   const targetUrl = validateUrl(options.url);
+
+  const headers = parseHeaders(options.header);
+  const localStorage = parseLocalStorage(options.localStorage);
 
   const collector = new JSCollector({
     headless: options.headless,
@@ -49,6 +82,9 @@ async function collectJS(options) {
     userAgent: options.userAgent,
     proxy: options.proxy,
     verbose: options.verbose,
+    cookies: options.cookies,
+    localStorage: localStorage,
+    headers: headers,
   });
 
   try {
@@ -156,6 +192,9 @@ program
   .option('--no-scroll', 'Disable automatic scrolling')
   .option('-A, --user-agent <string>', 'Custom User-Agent string')
   .option('-x, --proxy <url>', 'Proxy server URL (e.g., http://127.0.0.1:8080)')
+  .option('-c, --cookies <file>', 'Cookie file (JSON format, Playwright or Netscape style)')
+  .option('-H, --header <header...>', 'Extra HTTP header (format: "Name: Value")')
+  .option('--local-storage <entry...>', 'Set localStorage entry (format: "key=value")')
   .option('--fetch-all', 'Download all discovered JS files')
   .option('--fetch-one <url>', 'Download a specific JS file')
   .option('-d, --download-dir <dir>', 'Directory for downloaded files', './js-downloads')

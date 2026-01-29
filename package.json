@@ -1,0 +1,30 @@
+{
+  "name": "getjs",
+  "version": "1.0.0",
+  "description": "Extract JavaScript URLs from web applications by executing them like a real browser",
+  "main": "src/index.js",
+  "bin": {
+    "getjs": "./bin/getjs.js"
+  },
+  "scripts": {
+    "start": "node bin/getjs.js",
+    "postinstall": "playwright install chromium"
+  },
+  "keywords": [
+    "security",
+    "recon",
+    "javascript",
+    "web-scraping",
+    "penetration-testing",
+    "bug-bounty"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "playwright": "^1.42.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

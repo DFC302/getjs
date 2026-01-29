@@ -41,6 +41,9 @@ node --version  # Should be v18.0.0 or higher
 # Install globally from GitHub
 npm install -g github:DFC302/getjs
 
+# Install Chromium browser (required, one-time setup)
+npx playwright install chromium
+
 # Verify installation
 getjs --version
 ```
@@ -52,8 +55,11 @@ getjs --version
 git clone https://github.com/DFC302/getjs.git
 cd getjs
 
-# Install dependencies (this also installs Chromium)
+# Install dependencies
 npm install
+
+# Install Chromium browser (required, one-time setup)
+npx playwright install chromium
 
 # Option A: Install globally on your system
 npm install -g .
@@ -69,13 +75,15 @@ node bin/getjs.js -u https://example.com
 npx github:DFC302/getjs -u https://example.com
 ```
 
-### Post-Installation
+### Post-Installation (Required)
 
-The first run will automatically download Chromium (~170MB) via Playwright. If you need to manually trigger this:
+After installing getjs, you must install the Chromium browser (~170MB):
 
 ```bash
 npx playwright install chromium
 ```
+
+This only needs to be done once per system.
 
 ### Troubleshooting
 

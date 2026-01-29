@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node bin/getjs.js",
-    "postinstall": "playwright install chromium"
+    "postinstall": "npx playwright install chromium"
   },
   "keywords": [
     "security",

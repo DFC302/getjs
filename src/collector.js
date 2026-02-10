@@ -136,14 +136,13 @@ class JSCollector {
       this._ownsBrowser = true;
     }
 
+    const defaultUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
     const contextOptions = {
       ignoreHTTPSErrors: true,
       javaScriptEnabled: true,
+      userAgent: this.options.userAgent || defaultUserAgent,
     };
-
-    if (this.options.userAgent) {
-      contextOptions.userAgent = this.options.userAgent;
-    }
 
     // Add extra HTTP headers
     if (Object.keys(this.options.headers).length > 0) {

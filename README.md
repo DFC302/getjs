@@ -107,6 +107,23 @@ sudo apt-get install libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
 npx playwright install-deps chromium
 ```
 
+**Running `--no-headless` on a VPS without X server:**
+
+Some sites block headless browsers. Use Xvfb to create a virtual display so you can run in headed mode on a headless VPS:
+
+```bash
+# Install Xvfb
+sudo apt-get install xvfb
+
+# Run getjs with a virtual display
+xvfb-run getjs -u https://example.com --no-headless
+
+# Or start a persistent virtual display
+Xvfb :99 -screen 0 1920x1080x24 &
+export DISPLAY=:99
+getjs -u https://example.com --no-headless
+```
+
 ### Uninstall
 
 ```bash

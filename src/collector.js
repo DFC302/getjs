@@ -15,7 +15,8 @@ class JSCollector {
       userAgent: options.userAgent || null,
       proxy: options.proxy || null,
       verbose: options.verbose || false,
-      cookies: options.cookies || null,        // Cookie file path or array
+      cookies: options.cookies || null,        // Cookie file path, raw string, or array
+      cookieDomain: options.cookieDomain || null, // Domain for raw cookie strings
       localStorage: options.localStorage || null, // LocalStorage key-value pairs
       headers: options.headers || {},          // Extra HTTP headers
       browser: options.browser || null,        // Shared browser instance
@@ -167,17 +168,52 @@ class JSCollector {
     this.page.setDefaultTimeout(this.options.timeout);
   }
 
+  parseRawCookieString(cookieStr, domain) {
+    // Parse "name=value; name2=value2" format
+    return cookieStr
+      .split(';')
+      .map(pair => pair.trim())
+      .filter(pair => pair.includes('='))
+      .map(pair => {
+        const eqIndex = pair.indexOf('=');
+        const name = pair.substring(0, eqIndex).trim();
+        const value = pair.substring(eqIndex + 1).trim();
+        return {
+          name,
+          value,
+          domain,
+          path: '/',
+          sameSite: 'None',
+          secure: true,
+        };
+      });
+  }
+
   async loadCookies() {
     let cookies = this.options.cookies;
 
-    // If cookies is a file path, read it
     if (typeof cookies === 'string') {
-      try {
-        const cookieData = fs.readFileSync(cookies, 'utf8');
-        cookies = JSON.parse(cookieData);
-        this.log(`Loaded ${cookies.length} cookies from file`);
-      } catch (e) {
-        this.log(`Failed to load cookies from file: ${e.message}`);
+      // Check if it's a file path or a raw cookie string
+      if (fs.existsSync(cookies)) {
+        try {
+          const cookieData = fs.readFileSync(cookies, 'utf8');
+          cookies = JSON.parse(cookieData);
+          this.log(`Loaded ${cookies.length} cookies from file`);
+        } catch (e) {
+          this.log(`Failed to parse cookie file: ${e.message}`);
+          return;
+        }
+      } else if (cookies.includes('=')) {
+        // Raw cookie string: "name=value; name2=value2"
+        const domain = this.options.cookieDomain;
+        if (!domain) {
+          this.log('Raw cookie string provided but no domain available, skipping');
+          return;
+        }
+        cookies = this.parseRawCookieString(cookies, domain);
+        this.log(`Parsed ${cookies.length} cookies from raw string for domain ${domain}`);
+      } else {
+        this.log(`Cookie file not found: ${cookies}`);
         return;
       }
     }

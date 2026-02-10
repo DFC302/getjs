@@ -166,6 +166,8 @@ async function collectJS(options) {
   const headers = parseHeaders(options.header);
   const localStorage = parseLocalStorage(options.localStorage);
 
+  const cookieDomain = new URL(targetUrl).hostname;
+
   const collector = new JSCollector({
     headless: options.headless,
     timeout: options.timeout * 1000,
@@ -175,6 +177,7 @@ async function collectJS(options) {
     proxy: options.proxy,
     verbose: options.verbose,
     cookies: options.cookies,
+    cookieDomain: cookieDomain,
     localStorage: localStorage,
     headers: headers,
   });
@@ -323,6 +326,7 @@ async function collectMultipleJS(urls, options) {
     for (let i = 0; i < validUrls.length; i += threads) {
       const batch = validUrls.slice(i, i + threads);
       const batchPromises = batch.map(async (targetUrl) => {
+        const cookieDomain = new URL(targetUrl).hostname;
         const collector = new JSCollector({
           headless: options.headless,
           timeout: options.timeout * 1000,
@@ -332,6 +336,7 @@ async function collectMultipleJS(urls, options) {
           proxy: options.proxy,
           verbose: options.verbose,
           cookies: options.cookies,
+          cookieDomain: cookieDomain,
           localStorage: localStorage,
           headers: headers,
           browser: browser,
@@ -512,7 +517,7 @@ program
   .option('--no-scroll', 'Disable automatic scrolling')
   .option('-A, --user-agent <string>', 'Custom User-Agent string')
   .option('-x, --proxy <url>', 'Proxy server URL (e.g., http://127.0.0.1:8080)')
-  .option('-c, --cookies <file>', 'Cookie file (JSON format, Playwright or Netscape style)')
+  .option('-c, --cookies <file|string>', 'Cookie file (JSON) or raw cookie string (e.g., "name=val; name2=val2")')
   .option('-H, --header <header...>', 'Extra HTTP header (format: "Name: Value")')
   .option('--local-storage <entry...>', 'Set localStorage entry (format: "key=value")')
   .option('--fetch-all', 'Download all discovered JS files')

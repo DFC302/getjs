@@ -196,7 +196,7 @@ cat urls.txt | getjs [options]
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-c, --cookies <file>` | Cookie file (JSON format) | - |
+| `-c, --cookies <file\|string>` | Cookie file (JSON) or raw cookie string | - |
 | `-H, --header <header...>` | Extra HTTP headers | - |
 | `--local-storage <entry...>` | Set localStorage entries | - |
 
@@ -329,8 +329,14 @@ For login-protected pages, you can inject cookies, headers, or localStorage:
 # Using a cookie file (export from browser DevTools or EditThisCookie)
 getjs -u https://target.com/dashboard -c cookies.json -v
 
+# Using a raw cookie string (domain auto-detected from -u URL)
+getjs -u https://target.com/dashboard -c "session_id=abc123; token=eyJ...; cf_clearance=xyz"
+
 # Using HTTP headers (e.g., Authorization token)
 getjs -u https://target.com/api -H "Authorization: Bearer eyJ..." -H "X-API-Key: abc123"
+
+# Using a custom User-Agent string
+getjs -u https://target.com -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
 # Using localStorage (for JWT tokens stored client-side)
 getjs -u https://target.com --local-storage "token=eyJ..." --local-storage "userId=123"

@@ -18,6 +18,7 @@ class JSCollector {
       cookies: options.cookies || null,        // Cookie file path or array
       localStorage: options.localStorage || null, // LocalStorage key-value pairs
       headers: options.headers || {},          // Extra HTTP headers
+      browser: options.browser || null,        // Shared browser instance
     };
 
     this.jsUrls = new Set();
@@ -26,6 +27,7 @@ class JSCollector {
     this.browser = null;
     this.context = null;
     this.page = null;
+    this._ownsBrowser = true;
   }
 
   log(message) {
@@ -117,16 +119,22 @@ class JSCollector {
     return false;
   }
 
-  async init() {
-    const launchOptions = {
-      headless: this.options.headless,
-    };
+  async init(sharedBrowser = null) {
+    if (sharedBrowser) {
+      this.browser = sharedBrowser;
+      this._ownsBrowser = false;
+    } else {
+      const launchOptions = {
+        headless: this.options.headless,
+      };
 
-    if (this.options.proxy) {
-      launchOptions.proxy = { server: this.options.proxy };
+      if (this.options.proxy) {
+        launchOptions.proxy = { server: this.options.proxy };
+      }
+
+      this.browser = await chromium.launch(launchOptions);
+      this._ownsBrowser = true;
     }
-
-    this.browser = await chromium.launch(launchOptions);
 
     const contextOptions = {
       ignoreHTTPSErrors: true,
@@ -478,7 +486,7 @@ class JSCollector {
   async collect(targetUrl) {
     this.log(`Starting collection for: ${targetUrl}`);
 
-    await this.init();
+    await this.init(this.options.browser || null);
     await this.setupInterceptors(targetUrl);
 
     try {
@@ -556,9 +564,29 @@ class JSCollector {
   }
 
   async close() {
-    if (this.browser) {
-      await this.browser.close();
+    if (this.context) {
+      await this.context.close();
+      this.context = null;
+      this.page = null;
     }
+    if (this.browser && this._ownsBrowser) {
+      await this.browser.close();
+      this.browser = null;
+    }
+  }
+
+  async resetForNewTarget() {
+    // Close current context and page (but not the browser)
+    if (this.context) {
+      await this.context.close();
+      this.context = null;
+      this.page = null;
+    }
+
+    // Clear collected URLs
+    this.jsUrls = new Set();
+    this.wsJsUrls = new Set();
+    this.swScripts = new Set();
   }
 }
 
@@ -570,6 +598,7 @@ class JSDownloader {
       verbose: options.verbose || false,
       headers: options.headers || {},
     };
+    this._context = options.context || null; // Playwright BrowserContext
   }
 
   log(message) {
@@ -602,6 +631,45 @@ class JSDownloader {
   }
 
   async downloadOne(url, outputPath = null) {
+    let content;
+
+    if (this._context) {
+      // Use Playwright's request API (carries cookies/headers from browser context)
+      const request = this._context.request;
+      const response = await request.get(url, {
+        timeout: this.options.timeout,
+        ignoreHTTPSErrors: true,
+      });
+
+      if (response.status() >= 400) {
+        throw new Error(`HTTP ${response.status()} for ${url}`);
+      }
+
+      content = Buffer.from(await response.body());
+    } else {
+      // Fallback to raw HTTP (for standalone usage without browser)
+      content = await this._downloadRaw(url);
+    }
+
+    if (outputPath) {
+      const dir = path.dirname(outputPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(outputPath, content);
+      this.log(`Downloaded: ${url} -> ${outputPath}`);
+    }
+
+    return {
+      url,
+      content: content.toString('utf8'),
+      size: content.length,
+      path: outputPath,
+    };
+  }
+
+  async _downloadRaw(url) {
+    // Preserve original http/https fallback for when no browser context exists
     return new Promise((resolve, reject) => {
       const parsed = new URL(url);
       const protocol = parsed.protocol === 'https:' ? https : http;
@@ -621,9 +689,8 @@ class JSDownloader {
       };
 
       const req = protocol.request(options, (res) => {
-        // Handle redirects
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          this.downloadOne(res.headers.location, outputPath)
+          this._downloadRaw(res.headers.location)
             .then(resolve)
             .catch(reject);
           return;
@@ -636,25 +703,7 @@ class JSDownloader {
 
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          const content = Buffer.concat(chunks);
-
-          if (outputPath) {
-            const dir = path.dirname(outputPath);
-            if (!fs.existsSync(dir)) {
-              fs.mkdirSync(dir, { recursive: true });
-            }
-            fs.writeFileSync(outputPath, content);
-            this.log(`Downloaded: ${url} -> ${outputPath}`);
-          }
-
-          resolve({
-            url,
-            content: content.toString('utf8'),
-            size: content.length,
-            path: outputPath,
-          });
-        });
+        res.on('end', () => resolve(Buffer.concat(chunks)));
       });
 
       req.on('error', reject);
@@ -667,9 +716,10 @@ class JSDownloader {
     });
   }
 
-  async downloadAll(urls) {
+  async downloadAll(urls, contentDedup = false) {
     const results = [];
     const errors = [];
+    const seenHashes = new Set();
 
     // Ensure output directory exists
     if (!fs.existsSync(this.options.outputDir)) {
@@ -681,6 +731,19 @@ class JSDownloader {
         const filename = this.sanitizeFilename(url);
         const outputPath = path.join(this.options.outputDir, filename);
         const result = await this.downloadOne(url, outputPath);
+
+        if (contentDedup) {
+          const crypto = require('crypto');
+          const hash = crypto.createHash('sha256').update(result.content).digest('hex');
+          if (seenHashes.has(hash)) {
+            // Remove the duplicate file we just wrote
+            fs.unlinkSync(outputPath);
+            this.log(`Skipped duplicate (same content): ${url}`);
+            continue;
+          }
+          seenHashes.add(hash);
+        }
+
         results.push(result);
       } catch (error) {
         errors.push({ url, error: error.message });

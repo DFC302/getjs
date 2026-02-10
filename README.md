@@ -5,6 +5,7 @@ A production-grade JavaScript URL extractor for security researchers. Loads web 
 ## Features
 
 - **Real Browser Execution** - Uses Playwright/Chromium to execute JavaScript exactly like a real browser
+- **Multi-Domain Support** - Process multiple targets from a file or stdin with concurrent threads
 - **Dynamic JS Detection** - Captures scripts loaded via:
   - Static `<script src>` tags
   - Dynamic script injection
@@ -18,8 +19,12 @@ A production-grade JavaScript URL extractor for security researchers. Loads web 
   - Cookie injection (JSON file)
   - Custom HTTP headers (Authorization, API keys)
   - localStorage injection (for client-side tokens)
+- **Auth-Aware Downloads** - Downloaded JS files carry browser session cookies/headers
+- **Domain Filtering** - Whitelist/blacklist JS URLs by domain pattern
+- **Flexible Output** - Per-domain files, combined file, JSON, or stdout
+- **Resume Mode** - Incremental scanning skips already-discovered URLs
+- **Content Deduplication** - Skip duplicate JS files by content hash during download
 - **Smart URL Normalization** - Deduplicates and normalizes all discovered URLs
-- **Download Mode** - Fetch all discovered JS files or a specific one
 - **Proxy Support** - Route traffic through Burp Suite or other proxies
 - **Headless Toggle** - Run with visible browser for debugging
 
@@ -117,8 +122,11 @@ getjs -u https://example.com
 # Save to file
 getjs -u https://example.com -o js-urls.txt
 
-# With verbose output
-getjs -u https://example.com -v -o js-urls.txt
+# Scan multiple domains from a file
+getjs -f targets.txt --output-dir ./results
+
+# Pipe domains from stdin
+cat targets.txt | getjs --output-dir ./results
 
 # Download all discovered JS files
 getjs -u https://example.com --fetch-all -d ./js-files
@@ -132,14 +140,33 @@ getjs -u https://example.com --no-headless
 ### Collect Command (Default)
 
 ```
-getjs collect -u <url> [options]
-getjs -u <url> [options]
+getjs [collect] -u <url> [options]
+getjs [collect] -f <file> [options]
+cat urls.txt | getjs [options]
 ```
+
+#### Input Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-u, --url <url>` | Target URL to analyze | Required |
-| `-o, --output <file>` | Output file for JS URLs | stdout |
+| `-u, --url <url>` | Target URL to analyze | - |
+| `-f, --file <path>` | File containing URLs (one per line) | - |
+| (stdin) | Pipe URLs from stdin when no -u or -f | - |
+
+#### Output Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output <file>` | Output file for JS URLs (combined) | stdout |
+| `--output-dir <dir>` | Directory for per-domain output files | - |
+| `--json` | Output results as structured JSON | - |
+| `-s, --silent` | Suppress banner and status messages | - |
+| `-v, --verbose` | Verbose output | - |
+
+#### Browser Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
 | `--headless` | Run browser in headless mode | true |
 | `--no-headless` | Run browser with visible UI | - |
 | `-t, --timeout <seconds>` | Page load timeout | 30 |
@@ -147,25 +174,32 @@ getjs -u <url> [options]
 | `--no-scroll` | Disable automatic scrolling | - |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
-| `-c, --cookies <file>` | Cookie file (JSON format) | - |
-| `-H, --header <header...>` | Extra HTTP headers | - |
-| `--local-storage <entry...>` | Set localStorage entries | - |
-| `--fetch-all` | Download all discovered JS files | - |
-| `--fetch-one <url>` | Download a specific JS file | - |
-| `-d, --download-dir <dir>` | Directory for downloads | ./js-downloads |
-| `-v, --verbose` | Verbose output | - |
 
-### Download Command
-
-```
-getjs download -u <js-url> [options]
-```
+#### Authentication Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-u, --url <url>` | JavaScript URL to download | Required |
-| `-d, --download-dir <dir>` | Directory for downloaded file | ./js-downloads |
-| `-v, --verbose` | Verbose output | - |
+| `-c, --cookies <file>` | Cookie file (JSON format) | - |
+| `-H, --header <header...>` | Extra HTTP headers | - |
+| `--local-storage <entry...>` | Set localStorage entries | - |
+
+#### Download Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--fetch-all` | Download all discovered JS files | - |
+| `--fetch-one <url>` | Download a specific JS file | - |
+| `-d, --download-dir <dir>` | Directory for downloads | ./js-downloads |
+| `--dedupe-content` | Skip duplicate files by content hash | - |
+
+#### Multi-Domain Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--threads <n>` | Concurrent threads for multi-URL | 3 |
+| `--filter-domain <pattern...>` | Only include JS from matching domains | - |
+| `--exclude-domain <pattern...>` | Exclude JS from matching domains | - |
+| `--resume` | Skip URLs already in output file | - |
 
 ## Usage Examples
 
@@ -177,6 +211,90 @@ getjs -u https://target.com -o target-js.txt
 
 # View results
 cat target-js.txt
+```
+
+### Multi-Domain Scanning
+
+```bash
+# Scan multiple domains from a file
+getjs -f targets.txt --output-dir ./results
+
+# Per-domain output files are created automatically:
+# ./results/target_com.txt
+# ./results/app_example_com.txt
+# etc.
+
+# Pipe from stdin
+cat targets.txt | getjs --output-dir ./results
+
+# Combined output to single file
+getjs -f targets.txt -o all-js-urls.txt
+
+# Both per-domain and combined
+getjs -f targets.txt --output-dir ./results -o combined.txt
+
+# Control concurrency (default: 3 threads)
+getjs -f targets.txt --threads 5 --output-dir ./results
+```
+
+**Target file format (`targets.txt`):**
+```
+# Bug bounty targets
+https://target1.com
+https://app.target2.com
+https://staging.target3.com
+
+# Subdomain from recon
+https://api.target1.com
+```
+
+### Domain Filtering
+
+```bash
+# Only collect first-party JS
+getjs -u https://target.com --filter-domain "*.target.com"
+
+# Exclude known CDNs
+getjs -u https://target.com --exclude-domain "*.googleapis.com" --exclude-domain "*.cloudflare.com"
+
+# Combine filters
+getjs -f targets.txt --filter-domain "*.target.com" --exclude-domain "*.cdn.target.com"
+```
+
+### JSON Output
+
+```bash
+# Structured output for downstream processing
+getjs -u https://target.com --json
+
+# Multi-domain JSON (grouped by target)
+getjs -f targets.txt --json
+```
+
+Output format:
+```json
+{
+  "https://target.com": {
+    "count": 15,
+    "urls": [
+      "https://target.com/assets/app.js",
+      "https://target.com/assets/vendor.js"
+    ]
+  }
+}
+```
+
+### Resume / Incremental Mode
+
+```bash
+# First scan
+getjs -f targets.txt -o results.txt
+
+# Later: re-scan and only append new URLs
+getjs -f targets.txt -o results.txt --resume
+
+# Works with --output-dir too
+getjs -f targets.txt --output-dir ./results --resume
 ```
 
 ### With Burp Suite Proxy
@@ -226,8 +344,11 @@ getjs -u https://target.com/admin -c session.json -H "X-CSRF-Token: xyz"
 ### Download for Offline Analysis
 
 ```bash
-# Discover and download all JS
-getjs -u https://target.com --fetch-all -d ./target-js/
+# Discover and download all JS (auth-aware - carries browser cookies)
+getjs -u https://target.com --fetch-all -d ./target-js/ -c cookies.json
+
+# Skip duplicate files by content hash
+getjs -u https://target.com --fetch-all -d ./target-js/ --dedupe-content
 
 # Analyze with other tools
 grep -r "api_key" ./target-js/
@@ -244,20 +365,27 @@ getjs -u https://target.com --no-headless -v
 getjs -u https://target.com -t 60 -w 10
 ```
 
+### Silent Mode
+
+```bash
+# Suppress banner and status messages (clean output for piping)
+getjs -u https://target.com -s
+
+# Combine with other flags
+getjs -u https://target.com -s -o results.txt
+```
+
 ### Pipeline Integration
 
 ```bash
-# Feed into other tools
-getjs -u https://target.com | httpx -silent
+# Feed into other tools (silent mode for clean piping)
+getjs -u https://target.com -s | httpx -silent
 
 # Combine with nuclei
-getjs -u https://target.com | nuclei -t exposures/
+getjs -u https://target.com -s | nuclei -t exposures/
 
-# Mass scanning with output per target
-cat targets.txt | while read url; do
-  domain=$(echo "$url" | sed 's|https\?://||' | cut -d/ -f1)
-  getjs -u "$url" -o "${domain}-js.txt"
-done
+# Multi-domain with native file support (no shell loop needed)
+getjs -f targets.txt -s | nuclei -t exposures/
 ```
 
 ## Programmatic Usage
@@ -279,10 +407,11 @@ async function main() {
     console.log(`Found ${urls.length} JavaScript files:`);
     urls.forEach(url => console.log(url));
 
-    // Download files
+    // Download files (auth-aware when passing browser context)
     const downloader = new JSDownloader({
       outputDir: './js-files',
       verbose: true,
+      context: collector.context, // Carries cookies/headers
     });
 
     const { results, errors } = await downloader.downloadAll(urls);
@@ -300,40 +429,51 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs                                │
+│                         getjs v2.0                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
-│  └── Command parsing, output formatting                      │
+│  ├── URL input (single, file, stdin)                        │
+│  ├── Multi-domain orchestrator (concurrent batches)         │
+│  ├── Domain filtering (whitelist/blacklist)                 │
+│  ├── Output routing (stdout, file, per-domain, JSON)        │
+│  └── Resume/incremental mode                                │
 ├─────────────────────────────────────────────────────────────┤
-│  JSCollector (src/collector.js)                             │
-│  ├── Browser lifecycle management (Playwright)              │
-│  ├── Network interception (response listener)               │
-│  ├── DOM mutation observer (dynamic scripts)                │
-│  ├── Module import extraction (ES6 imports)                 │
-│  ├── Scroll-triggered lazy loading                          │
-│  └── URL normalization and deduplication                    │
+│  JSCollector (src/collector.js)                              │
+│  ├── Browser lifecycle (shared or standalone)                │
+│  ├── Network interception (response listener)                │
+│  ├── DOM mutation observer (dynamic scripts)                 │
+│  ├── Module import extraction (ES6 imports)                  │
+│  ├── Scroll-triggered lazy loading                           │
+│  ├── WebSocket monitoring                                    │
+│  ├── Service Worker extraction                               │
+│  └── URL normalization and deduplication                     │
 ├─────────────────────────────────────────────────────────────┤
-│  JSDownloader (src/collector.js)                            │
-│  ├── HTTP/HTTPS file fetching                               │
-│  ├── Redirect following                                     │
-│  └── Filename sanitization                                  │
+│  JSDownloader (src/collector.js)                             │
+│  ├── Auth-aware downloads (Playwright context)               │
+│  ├── Raw HTTP/HTTPS fallback                                 │
+│  ├── Content deduplication (SHA-256)                         │
+│  ├── Redirect following                                      │
+│  └── Filename sanitization                                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## How It Works
 
-1. **Browser Launch** - Starts a Chromium instance via Playwright
+1. **Browser Launch** - Starts a Chromium instance via Playwright (shared across domains in multi-mode)
 2. **Interceptor Setup** - Attaches listeners for:
    - Network responses (captures all JS by content-type/URL pattern)
    - DOM mutations (catches dynamically injected scripts)
    - Script creation (intercepts `document.createElement('script')`)
+   - WebSocket frames (monitors for JS URLs in WS payloads)
 3. **Page Navigation** - Loads the target URL, waits for network idle
 4. **DOM Extraction** - Extracts `<script src>` and `<link rel="preload">` elements
 5. **Scroll Triggering** - Scrolls the page to trigger lazy-loaded content
 6. **Interaction Triggering** - Hovers over elements to trigger lazy loading
 7. **Module Extraction** - Parses inline `<script type="module">` for imports
-8. **Normalization** - Converts all URLs to absolute, deduplicates
-9. **Output** - Returns sorted list of JS URLs
+8. **Service Worker Extraction** - Detects SW registrations and scripts via CDP
+9. **Normalization** - Converts all URLs to absolute, deduplicates
+10. **Filtering** - Applies domain whitelist/blacklist if configured
+11. **Output** - Returns sorted list of JS URLs in chosen format
 
 ## Limitations
 
@@ -347,9 +487,9 @@ main().catch(console.error);
 - [x] ~~Cookie injection support for authenticated sessions~~ ✅ Implemented
 - [x] ~~WebSocket traffic monitoring~~ ✅ Implemented
 - [x] ~~Service worker script extraction~~ ✅ Implemented
+- [x] ~~Concurrent multi-URL collection~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Source map discovery and parsing
-- [ ] Concurrent multi-URL collection
 - [ ] Cross-origin iframe script extraction
 - [ ] Integration with waybackurls for historical JS discovery
 

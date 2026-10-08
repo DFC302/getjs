@@ -1,14 +1,20 @@
 {
   "name": "getjs",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Extract JavaScript URLs from web applications by executing them like a real browser",
   "main": "src/index.js",
   "bin": {
     "getjs": "./bin/getjs.js"
   },
   "scripts": {
-    "start": "node bin/getjs.js"
+    "start": "node bin/getjs.js",
+    "test": "node --test"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md"
+  ],
   "keywords": [
     "security",
     "recon",

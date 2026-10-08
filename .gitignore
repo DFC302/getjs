@@ -2,3 +2,7 @@ node_modules/
 js-downloads/
 *.log
 .DS_Store
+
+# Browser authentication state contains live credentials
+*.storage-state.json
+getjs-storage-state.json

@@ -1,6 +1,6 @@
 # getjs
 
-A production-grade JavaScript URL extractor for security researchers. Loads web applications like a real browser, executing JavaScript to discover all JS files including dynamically loaded modules.
+A browser-backed JavaScript URL extractor for security researchers. It combines runtime network observation, DOM inspection, and bounded recursive bundle parsing to discover JavaScript used or referenced by web applications.
 
 ## Features
 
@@ -8,18 +8,25 @@ A production-grade JavaScript URL extractor for security researchers. Loads web 
 - **Multi-Domain Support** - Process multiple targets from a file or stdin with concurrent threads
 - **Dynamic JS Detection** - Captures scripts loaded via:
   - Static `<script src>` tags
+  - Deferred `data-src`, module-preload, preload, and prefetch elements
   - Dynamic script injection
-  - ES6 module imports
+  - Classic inline loaders and ES6 module imports
   - `import()` dynamic imports
   - XHR/fetch loaded scripts
+  - Same-origin and cross-origin frames
   - Lazy-loaded scripts triggered by scrolling
   - **WebSocket messages** (monitors for JS URLs in WS traffic)
   - **Service Workers** (detects SW registrations and scripts)
+- **Recursive Dependency Parsing** - Follows static imports, dynamic string imports, workers, and JavaScript URL literals with depth/file/size limits
+- **Optional Route Crawling** - Visits bounded, same-origin GET links while avoiding common logout and destructive routes
 - **Authentication Support** - Access protected pages via:
-  - Cookie injection (JSON file)
-  - Custom HTTP headers (Authorization, API keys)
-  - localStorage injection (for client-side tokens)
+  - Browser cookie exports, Netscape cookie jars, or raw cookie strings
+  - Playwright storage-state files containing cookies and per-origin localStorage
+  - Origin-scoped custom HTTP headers and localStorage values
+- **Interactive Auth Capture** - Log in through a headed browser and save a mode-`0600` storage-state file with `getjs auth`
 - **Auth-Aware Downloads** - Downloaded JS files carry browser session cookies/headers
+- **Safe Downloads** - Enforces size limits, rejects HTML responses, follows bounded redirects, scopes credentials per redirect, and uses collision-safe filenames
+- **Navigation Diagnostics** - Reports final URLs, redirect chains, failed requests, and authentication-related redirects in JSON output
 - **Domain Filtering** - Whitelist/blacklist JS URLs by domain pattern
 - **Flexible Output** - Per-domain files, combined file, JSON, or stdout
 - **Resume Mode** - Incremental scanning skips already-discovered URLs
@@ -124,6 +131,14 @@ export DISPLAY=:99
 getjs -u https://example.com --no-headless
 ```
 
+**Shell still finds an older installation:**
+
+```bash
+command -v getjs
+getjs -V
+rehash       # zsh only; needed after changing install locations, not every run
+```
+
 ### Uninstall
 
 ```bash
@@ -189,6 +204,12 @@ cat urls.txt | getjs [options]
 | `-t, --timeout <seconds>` | Page load timeout | 30 |
 | `-w, --wait <seconds>` | Additional wait after load | 5 |
 | `--no-scroll` | Disable automatic scrolling | - |
+| `--no-recursive` | Disable recursive dependency parsing | - |
+| `--max-depth <n>` | Maximum recursive import depth | 3 |
+| `--max-files <n>` | Maximum recursively parsed scripts | 500 |
+| `--max-file-size <mb>` | Maximum parsed/downloaded script size | 10 |
+| `--crawl` | Visit safe same-origin GET links | - |
+| `--max-pages <n>` | Maximum additional pages for `--crawl` | 10 |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
 
@@ -197,8 +218,31 @@ cat urls.txt | getjs [options]
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-c, --cookies <file\|string>` | Cookie file (JSON) or raw cookie string | - |
+| `--storage-state <file>` | Playwright storage state with cookies/localStorage | - |
+| `--cookie-domain <domain>` | Domain assigned to raw cookies | Target host |
 | `-H, --header <header...>` | Extra HTTP headers | - |
 | `--local-storage <entry...>` | Set localStorage entries | - |
+| `--auth-domain <pattern...>` | Expand header/localStorage scope beyond target origin | Target origin only |
+
+#### Auth Capture Command
+
+`getjs auth` opens a visible browser so you can complete a real login and save the resulting cookies and origin storage for later scans.
+
+```text
+getjs auth -u <url> -o <storage-state.json> [options]
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-u, --url <url>` | Login or application URL to open | Required |
+| `-o, --output <file>` | Storage-state JSON file to create | Required |
+| `-t, --timeout <seconds>` | Initial navigation timeout | 30 |
+| `-A, --user-agent <string>` | Custom User-Agent | Browser default |
+| `-x, --proxy <url>` | Proxy server URL | - |
+| `--channel <name>` | Browser channel such as `chrome` or `msedge` | Bundled Chromium |
+| `--force` | Overwrite an existing state file | - |
+
+Captured state is written with mode `0600`. Keep the browser open after logging in, return to the terminal, and press Enter to save it.
 
 #### Download Options
 
@@ -207,6 +251,7 @@ cat urls.txt | getjs [options]
 | `--fetch-all` | Download all discovered JS files | - |
 | `--fetch-one <url>` | Download a specific JS file | - |
 | `-d, --download-dir <dir>` | Directory for downloads | ./js-downloads |
+| `--download-concurrency <n>` | Concurrent downloads | 5 |
 | `--dedupe-content` | Skip duplicate files by content hash | - |
 
 #### Multi-Domain Options
@@ -236,10 +281,7 @@ cat target-js.txt
 # Scan multiple domains from a file
 getjs -f targets.txt --output-dir ./results
 
-# Per-domain output files are created automatically:
-# ./results/target_com.txt
-# ./results/app_example_com.txt
-# etc.
+# Per-target output filenames include the host, route, and a short URL hash.
 
 # Pipe from stdin
 cat targets.txt | getjs --output-dir ./results
@@ -296,7 +338,17 @@ Output format:
     "urls": [
       "https://target.com/assets/app.js",
       "https://target.com/assets/vendor.js"
-    ]
+    ],
+    "metadata": {
+      "initialUrl": "https://target.com/",
+      "finalUrl": "https://target.com/dashboard",
+      "title": "Dashboard",
+      "redirects": ["https://target.com/", "https://target.com/dashboard"],
+      "failedRequests": [],
+      "warnings": []
+    },
+    "downloads": { "completed": 0, "failed": [] },
+    "error": null
   }
 }
 ```
@@ -326,11 +378,21 @@ getjs -u https://target.com -x http://127.0.0.1:8080 -o js-urls.txt
 For login-protected pages, you can inject cookies, headers, or localStorage:
 
 ```bash
+# Recommended: open a browser, log in, then press Enter in the terminal
+getjs auth -u https://target.com/dashboard -o /tmp/target-state.json
+getjs -u https://target.com/dashboard --storage-state /tmp/target-state.json
+
 # Using a cookie file (export from browser DevTools or EditThisCookie)
 getjs -u https://target.com/dashboard -c cookies.json -v
 
-# Using a raw cookie string (domain auto-detected from -u URL)
+# Using a raw Cookie header value (the optional "Cookie:" prefix is accepted)
 getjs -u https://target.com/dashboard -c "session_id=abc123; token=eyJ...; cf_clearance=xyz"
+
+# For cookies shared across sibling hosts, set the intended cookie domain
+getjs -u https://app.target.com/dashboard -c "session=abc123" --cookie-domain .target.com
+
+# Preferred for multi-host sessions: preserve cookies and localStorage by origin
+getjs -u https://app.target.com/dashboard --storage-state browser-state.json
 
 # Using HTTP headers (e.g., Authorization token)
 getjs -u https://target.com/api -H "Authorization: Bearer eyJ..." -H "X-API-Key: abc123"
@@ -340,6 +402,9 @@ getjs -u https://target.com -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleW
 
 # Using localStorage (for JWT tokens stored client-side)
 getjs -u https://target.com --local-storage "token=eyJ..." --local-storage "userId=123"
+
+# Explicitly allow auth material on sibling domains when required
+getjs -u https://app.target.com -H "Authorization: Bearer eyJ..." --auth-domain "*.target.com"
 
 # Combined: cookies + custom headers
 getjs -u https://target.com/admin -c session.json -H "X-CSRF-Token: xyz"
@@ -364,6 +429,10 @@ getjs -u https://target.com/admin -c session.json -H "X-CSRF-Token: xyz"
 2. Use browser extension like "EditThisCookie" to export as JSON
 3. Or use: `document.cookie` in console and format manually
 
+Raw cookies apply to one domain because a Cookie header does not contain browser cookie attributes. For applications that authenticate across sibling hosts, export every required cookie with its original domain or use a Playwright storage-state file. Custom headers and `--local-storage` are restricted to the exact target origin unless `--auth-domain` is supplied, preventing credentials from being copied to unrelated resources and frames.
+
+`getjs auth` requires an interactive desktop session. Keep the browser open after logging in and press Enter in the terminal to save. Existing files are not overwritten unless `--force` is supplied, and saved state is restricted to mode `0600`. Treat storage-state files as credentials and delete or rotate them when the assessment ends.
+
 ### Download for Offline Analysis
 
 ```bash
@@ -373,10 +442,15 @@ getjs -u https://target.com --fetch-all -d ./target-js/ -c cookies.json
 # Skip duplicate files by content hash
 getjs -u https://target.com --fetch-all -d ./target-js/ --dedupe-content
 
+# Discover route-specific bundles without clicking controls
+getjs -u https://target.com --crawl --max-pages 20 --fetch-all -d ./target-js/
+
 # Analyze with other tools
 grep -r "api_key" ./target-js/
 grep -r "password" ./target-js/
 ```
+
+Recursive analysis can find plausible JavaScript references that the browser did not request. Some may be incomplete runtime templates or stale paths and can legitimately return `404` during `--fetch-all`. These are reported as partial download failures without discarding successful downloads. Use `--no-recursive` when you only want browser-observed resources.
 
 ### Debugging
 
@@ -434,7 +508,8 @@ async function main() {
     const downloader = new JSDownloader({
       outputDir: './js-files',
       verbose: true,
-      context: collector.context, // Carries cookies/headers
+      context: collector.context, // Carries browser cookies
+      headersForUrl: url => collector.headersForUrl(url),
     });
 
     const { results, errors } = await downloader.downloadAll(urls);
@@ -452,9 +527,10 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.0                          │
+│                         getjs v2.1                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
+│  ├── Interactive authenticated-state capture                │
 │  ├── URL input (single, file, stdin)                        │
 │  ├── Multi-domain orchestrator (concurrent batches)         │
 │  ├── Domain filtering (whitelist/blacklist)                 │
@@ -463,10 +539,11 @@ main().catch(console.error);
 ├─────────────────────────────────────────────────────────────┤
 │  JSCollector (src/collector.js)                              │
 │  ├── Browser lifecycle (shared or standalone)                │
-│  ├── Network interception (response listener)                │
+│  ├── Request/response/failure interception                   │
 │  ├── DOM mutation observer (dynamic scripts)                 │
-│  ├── Module import extraction (ES6 imports)                  │
+│  ├── Recursive module/import/worker extraction               │
 │  ├── Scroll-triggered lazy loading                           │
+│  ├── Optional bounded same-origin route crawling             │
 │  ├── WebSocket monitoring                                    │
 │  ├── Service Worker extraction                               │
 │  └── URL normalization and deduplication                     │
@@ -475,8 +552,8 @@ main().catch(console.error);
 │  ├── Auth-aware downloads (Playwright context)               │
 │  ├── Raw HTTP/HTTPS fallback                                 │
 │  ├── Content deduplication (SHA-256)                         │
-│  ├── Redirect following                                      │
-│  └── Filename sanitization                                   │
+│  ├── Bounded redirect following and response validation      │
+│  └── Collision-safe URL-hashed filenames                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -484,26 +561,37 @@ main().catch(console.error);
 
 1. **Browser Launch** - Starts a Chromium instance via Playwright (shared across domains in multi-mode)
 2. **Interceptor Setup** - Attaches listeners for:
-   - Network responses (captures all JS by content-type/URL pattern)
+   - Network requests, responses, and failures
    - DOM mutations (catches dynamically injected scripts)
-   - Script creation (intercepts `document.createElement('script')`)
-   - WebSocket frames (monitors for JS URLs in WS payloads)
-3. **Page Navigation** - Loads the target URL, waits for network idle
-4. **DOM Extraction** - Extracts `<script src>` and `<link rel="preload">` elements
+   - Sent and received WebSocket frames
+   - BrowserContext Service Worker events
+3. **Page Navigation** - Loads through `DOMContentLoaded`; later stages still run if background traffic never becomes idle
+4. **DOM Extraction** - Extracts scripts, deferred sources, preloads, prefetches, and inline references from the main page and frames
 5. **Scroll Triggering** - Scrolls the page to trigger lazy-loaded content
 6. **Interaction Triggering** - Hovers over elements to trigger lazy loading
-7. **Module Extraction** - Parses inline `<script type="module">` for imports
-8. **Service Worker Extraction** - Detects SW registrations and scripts via CDP
-9. **Normalization** - Converts all URLs to absolute, deduplicates
-10. **Filtering** - Applies domain whitelist/blacklist if configured
-11. **Output** - Returns sorted list of JS URLs in chosen format
+7. **Optional Route Crawl** - Visits bounded, safe-looking same-origin links without clicking controls
+8. **Module Extraction** - Parses inline and external bundles with import-map awareness and safety limits
+9. **Service Worker Extraction** - Detects inline registrations and registered workers through Playwright
+10. **Normalization** - Converts URLs to absolute form and deduplicates
+11. **Filtering and Downloads** - Applies domain filters before authenticated downloads
+12. **Output** - Returns URLs plus redirect, failure, warning, and download metadata in JSON mode
+
+## Exit Status
+
+| Code | Meaning |
+|------|---------|
+| `0` | Collection completed without target or download errors |
+| `1` | The command could not run, such as invalid options, missing input, or browser startup failure |
+| `2` | Collection produced usable results but one or more targets, inputs, or downloads failed |
 
 ## Limitations
 
 - **CAPTCHAs** - Cannot bypass CAPTCHA challenges automatically
 - **Heavily Obfuscated Loaders** - Custom loaders using eval() or complex string manipulation may evade detection
 - **Encrypted WebSocket Payloads** - If JS URLs are encrypted in WS messages, they won't be detected
-- **iframe Isolation** - Scripts in cross-origin iframes may not be captured
+- **State Explosion** - No finite crawler can exercise every application state; `--crawl` is intentionally bounded and does not click controls
+- **Computed Chunk Names** - Bundler URLs assembled entirely at runtime may require the corresponding feature to execute
+- **Static Candidates** - Recursive parsing intentionally reports plausible references even when they later return `404`; use `--no-recursive` for runtime-only results
 
 ## Future Improvements
 
@@ -511,9 +599,11 @@ main().catch(console.error);
 - [x] ~~WebSocket traffic monitoring~~ ✅ Implemented
 - [x] ~~Service worker script extraction~~ ✅ Implemented
 - [x] ~~Concurrent multi-URL collection~~ ✅ Implemented
+- [x] ~~Recursive external bundle parsing~~ ✅ Implemented
+- [x] ~~Bounded same-origin route crawling~~ ✅ Implemented
+- [x] ~~Interactive authenticated-state capture~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Source map discovery and parsing
-- [ ] Cross-origin iframe script extraction
 - [ ] Integration with waybackurls for historical JS discovery
 
 ## License

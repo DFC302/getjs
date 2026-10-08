@@ -18,8 +18,16 @@
  */
 
 const { JSCollector, JSDownloader } = require('./collector');
+const {
+  installManagedScanner,
+  scanDownloadedFiles,
+  scannerStatus,
+} = require('./secret-scanner');
 
 module.exports = {
   JSCollector,
   JSDownloader,
+  installManagedScanner,
+  scanDownloadedFiles,
+  scannerStatus,
 };

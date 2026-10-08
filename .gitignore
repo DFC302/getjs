@@ -6,3 +6,7 @@ js-downloads/
 # Browser authentication state contains live credentials
 *.storage-state.json
 getjs-storage-state.json
+
+# Secret scan reports contain unredacted credential material
+getjs-secrets.json
+getjs-secrets-*.json

@@ -7,6 +7,12 @@ const path = require('path');
 const readline = require('readline/promises');
 const { chromium } = require('playwright');
 const { JSCollector, JSDownloader } = require('../src/collector');
+const {
+  getRelease,
+  installManagedScanner,
+  scanDownloadedFiles,
+  scannerStatus,
+} = require('../src/secret-scanner');
 const { version: VERSION } = require('../package.json');
 
 function parseInteger(value, optionName, minimum) {
@@ -316,6 +322,22 @@ async function downloadForTarget(collector, urls, options) {
   return downloader.downloadAll(urls, options.dedupeContent || false);
 }
 
+async function scanDownloads(downloads, options) {
+  log(`[*] Scanning ${downloads.length} downloaded JavaScript files for secrets...`, options.silent);
+  if (!options.verifySecrets) {
+    log('[*] Credential verification is disabled; use --verify-secrets to enable network verification', options.silent);
+  }
+  const result = await scanDownloadedFiles(downloads, options);
+  log(
+    `[*] Secret scan: ${result.total} findings `
+      + `(${result.verified} verified, ${result.unverified} unverified, ${result.unknown} unknown)`,
+    options.silent,
+  );
+  log(`[!] Unredacted secret report saved to: ${result.reportPath} (mode 0600)`, options.silent);
+  if (options.failOnSecret && result.total > 0) process.exitCode = 3;
+  return result;
+}
+
 // --- Single-URL collection ---
 
 async function collectJS(options) {
@@ -352,6 +374,10 @@ async function collectJS(options) {
       }
     }
 
+    const secretScan = options.scanSecrets
+      ? await scanDownloads(downloads.results, options)
+      : null;
+
     const metadata = collector.getMetadata();
     metadata.warnings.forEach(warning => log(`[!] ${warning}`, options.silent));
 
@@ -375,6 +401,7 @@ async function collectJS(options) {
             completed: downloads.results.length,
             failed: downloads.errors,
           },
+          ...(secretScan && { secretScan }),
           error: null,
         },
       };
@@ -383,7 +410,7 @@ async function collectJS(options) {
       filteredUrls.forEach(url => console.log(url));
     }
 
-    return { targetUrl, urls: filteredUrls, metadata, downloads, error: null };
+    return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, error: null };
   } finally {
     await collector.close();
   }
@@ -478,6 +505,13 @@ async function collectMultipleJS(urls, options) {
       }
     }
 
+    let secretScan = null;
+    if (options.scanSecrets) {
+      const downloads = [...allResults.values()].flatMap(result => result.downloads.results);
+      secretScan = await scanDownloads(downloads, options);
+      for (const result of allResults.values()) result.secretScan = secretScan;
+    }
+
     await handleMultiOutput(allResults, options);
   } finally {
     await browser.close();
@@ -486,7 +520,7 @@ async function collectMultipleJS(urls, options) {
   const failures = [...allResults.values()].filter(result => result.error);
   const downloadFailures = [...allResults.values()].flatMap(result => result.downloads.errors);
   if (invalidCount > 0 || failures.length > 0 || downloadFailures.length > 0) {
-    process.exitCode = 2;
+    process.exitCode = Math.max(Number(process.exitCode) || 0, 2);
   }
   return allResults;
 }
@@ -530,6 +564,7 @@ async function handleMultiOutput(allResults, options) {
           completed: result.downloads.results.length,
           failed: result.downloads.errors,
         },
+        ...(result.secretScan && { secretScan: result.secretScan }),
         error: result.error,
       };
     }
@@ -587,9 +622,25 @@ const collectCommand = program
   .option('--json', 'Output results as JSON')
   .option('--resume', 'Skip URLs already in output file (incremental mode)')
   .option('--dedupe-content', 'Skip duplicate JS files by content hash during download')
+  .option('--scan-secrets', 'Download discovered JS and scan it with TruffleHog')
+  .option('--secret-report <file>', 'Path for the unredacted secret report (default: <download-dir>/getjs-secrets.json)')
+  .option('--verify-secrets', 'Allow TruffleHog to verify discovered credentials over the network')
+  .option('--fail-on-secret', 'Exit with status 3 when the secret scan finds one or more candidates')
+  .option('--trufflehog-path <file>', 'Use a specific TruffleHog executable')
+  .option('--install-scanner', 'Install the managed TruffleHog release before scanning')
+  .option('--update-scanner', 'Update managed TruffleHog to the latest release before scanning')
+  .option('--scanner-version <version>', 'Managed TruffleHog version used with --install-scanner/--update-scanner')
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
-  .addHelpText('after', '\nAuthentication capture:\n  getjs auth -u <url> -o <storage-state.json>')
+  .addHelpText(
+    'after',
+    '\nPipeline example:\n'
+      + '  getjs -u https://example.com --fetch-all --scan-secrets --install-scanner\n'
+      + '\nAuthentication capture:\n'
+      + '  getjs auth -u <url> -o <storage-state.json>\n'
+      + '\nScanner management:\n'
+      + '  getjs scanner <install|status|update>',
+  )
   .action(async (options) => {
     printBanner(options.silent);
 
@@ -598,6 +649,28 @@ const collectCommand = program
     }
     if (options.fetchAll && options.fetchOne) {
       throw new Error('Use either --fetch-all or --fetch-one, not both');
+    }
+    const scannerOnlyOptions = [
+      options.secretReport,
+      options.verifySecrets,
+      options.failOnSecret,
+      options.trufflehogPath,
+      options.installScanner,
+      options.updateScanner,
+      options.scannerVersion,
+    ];
+    if (!options.scanSecrets && scannerOnlyOptions.some(Boolean)) {
+      throw new Error('Secret-scanner options require --scan-secrets');
+    }
+    if (options.installScanner && options.updateScanner) {
+      throw new Error('Use either --install-scanner or --update-scanner, not both');
+    }
+    if (options.trufflehogPath && (options.installScanner || options.updateScanner)) {
+      throw new Error('--trufflehog-path cannot be combined with --install-scanner or --update-scanner');
+    }
+    if (options.scanSecrets && !options.fetchAll && !options.fetchOne) {
+      options.fetchAll = true;
+      log('[*] --scan-secrets enabled --fetch-all for the collection pipeline', options.silent);
     }
 
     // Determine URL sources
@@ -644,6 +717,54 @@ program
   .option('--force', 'Overwrite an existing storage-state file')
   .action(captureAuthState);
 
+const scannerCommand = program
+  .command('scanner')
+  .description('Install, inspect, or update the managed TruffleHog scanner')
+  .version(VERSION);
+
+scannerCommand
+  .command('install')
+  .description('Install a checksum-validated TruffleHog release managed by getjs')
+  .option('--scanner-version <version>', 'Release version (default: latest)', 'latest')
+  .option('--force', 'Reinstall even when the requested release is already installed')
+  .action(async options => {
+    const result = await installManagedScanner({
+      version: options.scannerVersion,
+      force: options.force,
+    });
+    console.log(`${result.installed ? 'Installed' : 'Already installed'} ${result.release}`);
+    console.log(`Path: ${result.path}`);
+    console.log(`Version: ${result.version}`);
+  });
+
+scannerCommand
+  .command('status')
+  .description('Show managed and system TruffleHog installations')
+  .option('--check-updates', 'Query the official release feed for the latest version')
+  .action(async options => {
+    const status = scannerStatus();
+    console.log(`Selected: ${status.selected || 'not found'}`);
+    console.log(`Managed: ${status.managed ? `${status.managed.version} (${status.managed.path})` : 'not installed'}`);
+    console.log(`System: ${status.system ? `${status.system.version} (${status.system.path})` : 'not found'}`);
+    if (options.checkUpdates) {
+      const latest = await getRelease('latest');
+      console.log(`Latest release: ${latest.tag_name}`);
+      if (status.managed?.manifest?.release && status.managed.manifest.release !== latest.tag_name) {
+        console.log('Update available: run getjs scanner update');
+      }
+    }
+  });
+
+scannerCommand
+  .command('update')
+  .description('Install the latest checksum-validated TruffleHog release')
+  .action(async () => {
+    const result = await installManagedScanner({ version: 'latest' });
+    console.log(`${result.installed ? 'Updated' : 'Already current'} ${result.release}`);
+    console.log(`Path: ${result.path}`);
+    console.log(`Version: ${result.version}`);
+  });
+
 // Since collect is the default command, make top-level help describe the
 // options users can actually pass to `getjs` rather than only listing the
 // otherwise-redundant collect subcommand.
@@ -676,5 +797,6 @@ module.exports = {
   matchDomainPattern,
   parseInteger,
   sanitizeDomainFilename,
+  scanDownloads,
   writeUrlFile,
 };

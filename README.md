@@ -34,6 +34,9 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Smart URL Normalization** - Deduplicates and normalizes all discovered URLs
 - **Proxy Support** - Route traffic through Burp Suite or other proxies
 - **Headless Toggle** - Run with visible browser for debugging
+- **Secret Scanning Pipeline** - Discover, download, and scan JavaScript with TruffleHog in one command
+- **Unredacted Evidence Reports** - Preserves complete findings in mode-`0600` JSON reports for validation
+- **Managed TruffleHog** - Installs and explicitly updates checksum-validated official releases
 
 ## Installation
 
@@ -41,24 +44,33 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 
 - **Node.js 18+** - Required for Playwright compatibility
 - **npm** - Comes with Node.js
+- **tar** - Used only for managed TruffleHog installation (normally preinstalled on Linux/macOS and modern Windows)
 
 Check your Node.js version:
 ```bash
 node --version  # Should be v18.0.0 or higher
 ```
 
-### Option 1: Install from GitHub (Recommended)
+### Option 1: Full Installation from GitHub (Recommended)
+
+The repository is private, so GitHub authentication must already be configured for npm/Git.
 
 ```bash
-# Install globally from GitHub
+# Install getjs globally from GitHub
 npm install -g github:DFC302/getjs
 
 # Install Chromium browser (required, one-time setup)
 npx playwright install chromium
 
-# Verify installation
+# Install managed TruffleHog (required only for --scan-secrets)
+getjs scanner install
+
+# Verify both components
 getjs --version
+getjs scanner status --check-updates
 ```
+
+TruffleHog is not downloaded silently during a normal getjs installation or collection. This keeps installation predictable for offline and restricted systems. To install it as part of the first scanning pipeline instead, omit `getjs scanner install` and use `--install-scanner` with `--scan-secrets`.
 
 ### Option 2: Clone and Install Locally
 
@@ -87,7 +99,7 @@ node bin/getjs.js -u https://example.com
 npx github:DFC302/getjs -u https://example.com
 ```
 
-### Post-Installation (Required)
+### Required Browser Setup
 
 After installing getjs, you must install the Chromium browser (~170MB):
 
@@ -96,6 +108,29 @@ npx playwright install chromium
 ```
 
 This only needs to be done once per system.
+
+Secret scanning additionally requires TruffleHog. Install it separately:
+
+```bash
+getjs scanner install
+getjs scanner status --check-updates
+```
+
+You can skip this separate step and add `--install-scanner` to the first `--scan-secrets` pipeline instead. Scanner updates remain explicit through `getjs scanner update` or the pipeline's `--update-scanner` flag.
+
+### Updating
+
+```bash
+# Update getjs from the private GitHub repository
+npm install -g github:DFC302/getjs
+
+# Update the managed scanner to the latest official release
+getjs scanner update
+
+# Confirm the active versions and query the official release feed
+getjs --version
+getjs scanner status --check-updates
+```
 
 ### Troubleshooting
 
@@ -162,6 +197,20 @@ cat targets.txt | getjs --output-dir ./results
 
 # Download all discovered JS files
 getjs -u https://example.com --fetch-all -d ./js-files
+
+# Discover, download, and scan all JS in one pipeline
+getjs -u https://example.com --scan-secrets -d ./js-files
+
+# Install TruffleHog automatically as part of the first pipeline run
+getjs -u https://example.com --scan-secrets --install-scanner -d ./js-files
+
+# Authenticated discovery, download, and secret scan
+getjs -u https://example.com/dashboard \
+  --storage-state ./target.storage-state.json \
+  --crawl \
+  --scan-secrets \
+  --secret-report ./js-files/getjs-secrets.json \
+  -d ./js-files
 
 # Run with visible browser (for debugging)
 getjs -u https://example.com --no-headless
@@ -253,6 +302,35 @@ Captured state is written with mode `0600`. Keep the browser open after logging 
 | `-d, --download-dir <dir>` | Directory for downloads | ./js-downloads |
 | `--download-concurrency <n>` | Concurrent downloads | 5 |
 | `--dedupe-content` | Skip duplicate files by content hash | - |
+
+#### Secret Scanning Options
+
+`--scan-secrets` runs collection, enables `--fetch-all` when no explicit fetch option was supplied, and scans only files successfully downloaded during that invocation.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--scan-secrets` | Download and scan discovered JavaScript with TruffleHog | - |
+| `--secret-report <file>` | Unredacted JSON evidence report | `<download-dir>/getjs-secrets.json` |
+| `--verify-secrets` | Allow provider verification requests | Disabled |
+| `--fail-on-secret` | Exit with status `3` when candidates are found | - |
+| `--trufflehog-path <file>` | Use a specific TruffleHog executable | Managed binary, then `PATH` |
+| `--install-scanner` | Install managed TruffleHog before the scan | - |
+| `--update-scanner` | Update managed TruffleHog before the scan | - |
+| `--scanner-version <version>` | Version used by pipeline installation/update | Latest |
+
+Reports intentionally contain full, unredacted credential material and are created with permissions `0600`. The default report name is ignored by Git. Protect custom report paths yourself, and do not attach reports to tickets or commits without reviewing their contents.
+
+Verification is disabled by default because it can make outbound requests containing a candidate credential. Use `--verify-secrets` only when the engagement scope permits active validation.
+
+#### Scanner Management Command
+
+```text
+getjs scanner install [--scanner-version <version>] [--force]
+getjs scanner status [--check-updates]
+getjs scanner update
+```
+
+Managed binaries are stored under the user's data directory (`~/.local/share/getjs` on a typical Linux installation). Installation downloads an official TruffleHog release and validates the archive against its published SHA-256 checksum before replacing the managed binary. Updates are explicit so an engagement remains reproducible; `status --check-updates` reports whether a newer official release exists.
 
 #### Multi-Domain Options
 
@@ -452,6 +530,33 @@ grep -r "password" ./target-js/
 
 Recursive analysis can find plausible JavaScript references that the browser did not request. Some may be incomplete runtime templates or stale paths and can legitimately return `404` during `--fetch-all`. These are reported as partial download failures without discarding successful downloads. Use `--no-recursive` when you only want browser-observed resources.
 
+### Secret Scanning Pipeline
+
+```bash
+# Existing TruffleHog installation or managed binary
+getjs -u https://target.com \
+  --storage-state /tmp/target-state.json \
+  --scan-secrets \
+  --download-dir ./target-js
+
+# First run: install the managed scanner, then collect/download/scan
+getjs -u https://target.com \
+  --scan-secrets \
+  --install-scanner \
+  --secret-report ./evidence/target-secrets.json \
+  --download-dir ./target-js
+
+# Update first, enable provider verification, and fail CI on findings
+getjs -f targets.txt \
+  --scan-secrets \
+  --update-scanner \
+  --verify-secrets \
+  --fail-on-secret \
+  --secret-report ./evidence/all-secrets.json
+```
+
+The report records the getjs version, TruffleHog path/version, verification setting, scanned files and hashes, summary counts, and complete TruffleHog finding objects. Public client identifiers and false positives can still be reported; findings require analyst review.
+
 ### Debugging
 
 ```bash
@@ -488,7 +593,7 @@ getjs -f targets.txt -s | nuclei -t exposures/
 ## Programmatic Usage
 
 ```javascript
-const { JSCollector, JSDownloader } = require('getjs');
+const { JSCollector, JSDownloader, scanDownloadedFiles } = require('getjs');
 
 async function main() {
   // Initialize collector
@@ -515,6 +620,13 @@ async function main() {
     const { results, errors } = await downloader.downloadAll(urls);
     console.log(`Downloaded ${results.length} files`);
 
+    const secretScan = await scanDownloadedFiles(results, {
+      downloadDir: './js-files',
+      secretReport: './js-files/getjs-secrets.json',
+      verifySecrets: false,
+    });
+    console.log(`Secret candidates: ${secretScan.total}`);
+
   } finally {
     await collector.close();
   }
@@ -527,7 +639,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.1                          │
+│                         getjs v2.2                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │
@@ -554,6 +666,12 @@ main().catch(console.error);
 │  ├── Content deduplication (SHA-256)                         │
 │  ├── Bounded redirect following and response validation      │
 │  └── Collision-safe URL-hashed filenames                     │
+├─────────────────────────────────────────────────────────────┤
+│  Secret Scanner (src/secret-scanner.js)                      │
+│  ├── TruffleHog discovery and managed installation            │
+│  ├── Official release checksum validation                     │
+│  ├── Offline-by-default scanning                              │
+│  └── Mode-0600 unredacted evidence reports                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -574,7 +692,8 @@ main().catch(console.error);
 9. **Service Worker Extraction** - Detects inline registrations and registered workers through Playwright
 10. **Normalization** - Converts URLs to absolute form and deduplicates
 11. **Filtering and Downloads** - Applies domain filters before authenticated downloads
-12. **Output** - Returns URLs plus redirect, failure, warning, and download metadata in JSON mode
+12. **Optional Secret Scan** - Runs TruffleHog against files downloaded by the current invocation
+13. **Output** - Returns URLs plus redirect, failure, warning, download, and scan metadata in JSON mode
 
 ## Exit Status
 
@@ -583,6 +702,7 @@ main().catch(console.error);
 | `0` | Collection completed without target or download errors |
 | `1` | The command could not run, such as invalid options, missing input, or browser startup failure |
 | `2` | Collection produced usable results but one or more targets, inputs, or downloads failed |
+| `3` | `--fail-on-secret` was enabled and the scan produced one or more findings |
 
 ## Limitations
 
@@ -592,6 +712,8 @@ main().catch(console.error);
 - **State Explosion** - No finite crawler can exercise every application state; `--crawl` is intentionally bounded and does not click controls
 - **Computed Chunk Names** - Bundler URLs assembled entirely at runtime may require the corresponding feature to execute
 - **Static Candidates** - Recursive parsing intentionally reports plausible references even when they later return `404`; use `--no-recursive` for runtime-only results
+- **Secret Scanner Coverage** - TruffleHog scans downloaded files only; undiscovered chunks and runtime-only configuration remain outside the report
+- **Candidate Quality** - Unverified findings, public identifiers, and false positives require manual review
 
 ## Future Improvements
 
@@ -602,6 +724,8 @@ main().catch(console.error);
 - [x] ~~Recursive external bundle parsing~~ ✅ Implemented
 - [x] ~~Bounded same-origin route crawling~~ ✅ Implemented
 - [x] ~~Interactive authenticated-state capture~~ ✅ Implemented
+- [x] ~~Optional TruffleHog secret scanning pipeline~~ ✅ Implemented
+- [x] ~~Managed scanner installation and updates~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Source map discovery and parsing
 - [ ] Integration with waybackurls for historical JS discovery

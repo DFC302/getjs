@@ -53,6 +53,26 @@ test('auth command documents secure interactive storage-state capture', () => {
   assert.match(nonInteractive.stderr, /requires an interactive terminal/);
 });
 
+test('secret scanning and scanner management are exposed by the CLI', () => {
+  const collectHelp = runCli(['-h']);
+  assert.equal(collectHelp.status, 0);
+  assert.match(collectHelp.stdout, /--scan-secrets/);
+  assert.match(collectHelp.stdout, /--secret-report <file>/);
+  assert.match(collectHelp.stdout, /--verify-secrets/);
+  assert.match(collectHelp.stdout, /--install-scanner/);
+  assert.match(collectHelp.stdout, /--update-scanner/);
+
+  const scannerHelp = runCli(['scanner', '-h']);
+  assert.equal(scannerHelp.status, 0);
+  assert.match(scannerHelp.stdout, /install \[options\]/);
+  assert.match(scannerHelp.stdout, /status \[options\]/);
+  assert.match(scannerHelp.stdout, /update/);
+
+  const invalid = runCli(['-u', 'https://example.com/', '--verify-secrets']);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /require --scan-secrets/);
+});
+
 test('numeric options use decimal parsing and reject unsafe values', () => {
   const { parseInteger } = require('../bin/getjs');
 

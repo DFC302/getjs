@@ -1,6 +1,7 @@
 {
   "ai": {
     "provider": "codex",
+    "task": "full",
     "prompt": "builtin",
     "timeoutSeconds": 900,
     "maxFiles": 250,

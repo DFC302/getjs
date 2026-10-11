@@ -9,12 +9,16 @@ const { sha256File, writePrivateJson } = require('./secret-scanner');
 
 const BUILTIN_PROMPT_PATH = path.resolve(__dirname, '..', 'prompts', 'default-security-analysis.md');
 const BUILTIN_SCHEMA_PATH = path.resolve(__dirname, '..', 'schemas', 'ai-analysis.schema.json');
+const BUILTIN_ENDPOINT_PROMPT_PATH = path.resolve(__dirname, '..', 'prompts', 'default-endpoint-analysis.md');
+const BUILTIN_ENDPOINT_SCHEMA_PATH = path.resolve(__dirname, '..', 'schemas', 'ai-endpoints.schema.json');
 const SUPPORTED_PROVIDERS = new Set(['codex', 'claude']);
+const SUPPORTED_AI_TASKS = new Set(['full', 'endpoints']);
 const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 const DEFAULT_AI_CONFIG = Object.freeze({
   ai: {
     provider: 'codex',
+    task: 'full',
     prompt: 'builtin',
     timeoutSeconds: 900,
     maxFiles: 250,
@@ -90,13 +94,23 @@ function loadAIConfig(explicitPath = null) {
   };
 }
 
-function resolveConfiguredPath(value, baseDirectory) {
-  if (!value || value === 'builtin') return BUILTIN_PROMPT_PATH;
+function builtInAssets(task) {
+  return task === 'endpoints'
+    ? { promptPath: BUILTIN_ENDPOINT_PROMPT_PATH, schemaPath: BUILTIN_ENDPOINT_SCHEMA_PATH }
+    : { promptPath: BUILTIN_PROMPT_PATH, schemaPath: BUILTIN_SCHEMA_PATH };
+}
+
+function resolveConfiguredPath(value, baseDirectory, task) {
+  if (!value || value === 'builtin') return builtInAssets(task).promptPath;
   return path.isAbsolute(value) ? value : path.resolve(baseDirectory, value);
 }
 
 function resolveAISettings(options = {}) {
   const loaded = loadAIConfig(options.aiConfig);
+  const task = String(options.aiTask || loaded.ai.task || 'full').toLowerCase();
+  if (!SUPPORTED_AI_TASKS.has(task)) {
+    throw new Error(`Unsupported AI task "${task}"; expected full or endpoints`);
+  }
   const provider = typeof options.ai === 'string' && options.ai.length > 0
     ? options.ai.toLowerCase()
     : String(loaded.ai.provider || 'codex').toLowerCase();
@@ -111,12 +125,13 @@ function resolveAISettings(options = {}) {
     throw new Error('AI prompt must be "builtin" or a non-empty file path');
   }
   const promptBase = promptFromCli ? process.cwd() : loaded.directory;
-  const promptPath = resolveConfiguredPath(promptValue.trim(), promptBase);
+  const assets = builtInAssets(task);
+  const promptPath = resolveConfiguredPath(promptValue.trim(), promptBase, task);
   if (!fs.existsSync(promptPath) || !fs.statSync(promptPath).isFile()) {
     throw new Error(`AI prompt file not found: ${promptPath}`);
   }
-  if (!fs.existsSync(BUILTIN_SCHEMA_PATH)) {
-    throw new Error(`AI output schema not found: ${BUILTIN_SCHEMA_PATH}`);
+  if (!fs.existsSync(assets.schemaPath)) {
+    throw new Error(`AI output schema not found: ${assets.schemaPath}`);
   }
 
   const timeoutSeconds = options.aiTimeout ?? loaded.ai.timeoutSeconds;
@@ -156,13 +171,14 @@ function resolveAISettings(options = {}) {
   }
 
   return {
+    task,
     provider,
     executable: executable.trim(),
     model: model?.trim() || null,
     codexHome,
     promptPath,
-    promptSource: promptPath === BUILTIN_PROMPT_PATH ? 'builtin' : promptPath,
-    schemaPath: BUILTIN_SCHEMA_PATH,
+    promptSource: promptPath === assets.promptPath ? 'builtin' : promptPath,
+    schemaPath: assets.schemaPath,
     timeoutSeconds,
     maxFiles,
     maxTotalBytes,
@@ -216,6 +232,7 @@ function getAIStatus(options = {}) {
   const settings = resolveAISettings(options);
   const executable = executableFromPath(settings.executable);
   return {
+    task: settings.task,
     provider: settings.provider,
     configuredExecutable: settings.executable,
     executable,
@@ -565,19 +582,32 @@ function unwrapClaudeOutput(stdout) {
   throw new Error('Claude output did not contain a structured analysis result');
 }
 
-function assertRootReportShape(report) {
-  const required = [
-    'schema_version',
-    'run',
-    'target',
-    'executive_summary',
-    'coverage',
-    'evidence',
-    'inventory',
-    'findings',
-    'hunt_plan',
-    'global_limitations',
-  ];
+function assertRootReportShape(report, task = 'full') {
+  const required = task === 'endpoints'
+    ? [
+      'schema_version',
+      'analysis_task',
+      'run',
+      'target',
+      'coverage',
+      'evidence',
+      'endpoints',
+      'graphql_operations',
+      'realtime_channels',
+      'limitations',
+    ]
+    : [
+      'schema_version',
+      'run',
+      'target',
+      'executive_summary',
+      'coverage',
+      'evidence',
+      'inventory',
+      'findings',
+      'hunt_plan',
+      'global_limitations',
+    ];
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
     throw new Error('AI result must be a JSON object');
   }
@@ -586,10 +616,16 @@ function assertRootReportShape(report) {
   const unexpected = Object.keys(report).filter(key => !required.includes(key));
   if (unexpected.length > 0) throw new Error(`AI result contains unexpected fields: ${unexpected.join(', ')}`);
   if (report.schema_version !== '1.0') throw new Error(`Unsupported AI report schema version: ${report.schema_version}`);
-  for (const key of ['executive_summary', 'evidence', 'findings', 'hunt_plan', 'global_limitations']) {
+  const arrayFields = task === 'endpoints'
+    ? ['evidence', 'endpoints', 'graphql_operations', 'realtime_channels', 'limitations']
+    : ['executive_summary', 'evidence', 'findings', 'hunt_plan', 'global_limitations'];
+  for (const key of arrayFields) {
     if (!Array.isArray(report[key])) throw new Error(`AI result field ${key} must be an array`);
   }
-  if (!report.inventory || typeof report.inventory !== 'object' || Array.isArray(report.inventory)) {
+  if (task === 'endpoints' && report.analysis_task !== 'endpoints') {
+    throw new Error(`AI result analysis_task must be endpoints, not ${report.analysis_task}`);
+  }
+  if (task === 'full' && (!report.inventory || typeof report.inventory !== 'object' || Array.isArray(report.inventory))) {
     throw new Error('AI result inventory must be an object');
   }
   if (!report.coverage || typeof report.coverage !== 'object' || Array.isArray(report.coverage)) {
@@ -651,9 +687,9 @@ function validateAgainstSchema(value, schema, rootSchema, location = '$') {
   }
 }
 
-function normalizeReport(report, manifest, run, target, schema = null, fileContents = []) {
+function normalizeReport(report, manifest, run, target, schema = null, fileContents = [], task = 'full') {
   if (schema) validateAgainstSchema(report, schema, schema);
-  assertRootReportShape(report);
+  assertRootReportShape(report, task);
   report.target = target;
   report.run = run;
 
@@ -740,8 +776,14 @@ function normalizeReport(report, manifest, run, target, schema = null, fileConte
     }
     Object.values(value).forEach(inspectReferences);
   };
-  inspectReferences(report.inventory);
-  inspectReferences(report.findings);
+  if (task === 'endpoints') {
+    inspectReferences(report.endpoints);
+    inspectReferences(report.graphql_operations);
+    inspectReferences(report.realtime_channels);
+  } else {
+    inspectReferences(report.inventory);
+    inspectReferences(report.findings);
+  }
   if (missingEvidence.size > 0) {
     throw new Error(`AI result references missing evidence IDs: ${[...missingEvidence].join(', ')}`);
   }
@@ -757,7 +799,51 @@ function markdownCode(value) {
   return `\`${String(value ?? '').replace(/`/g, '\\`')}\``;
 }
 
+function renderEndpointMarkdown(report) {
+  const lines = [
+    `# getjs AI endpoints: ${report.target}`,
+    '',
+    '> Endpoint inventory inferred from downloaded JavaScript. Treat it as private reconnaissance evidence.',
+    '',
+    `- Provider: ${report.run.provider}${report.run.model ? ` (${report.run.model})` : ''}`,
+    `- Generated: ${report.run.generated_at}`,
+    `- Coverage: ${report.coverage.files_analyzed.length}/${report.coverage.files_provided} supplied files`,
+    `- HTTP/API endpoints: ${report.endpoints.length}`,
+    `- GraphQL operations: ${report.graphql_operations.length}`,
+    `- Realtime channels: ${report.realtime_channels.length}`,
+    '',
+    '## Endpoints',
+    '',
+  ];
+  if (report.endpoints.length === 0) lines.push('No endpoints reported.');
+  else {
+    lines.push('| ID | Methods | URL | Parameters | Auth | Confidence |', '|---|---|---|---:|---|---|');
+    for (const endpoint of report.endpoints) {
+      lines.push(`| ${markdownText(endpoint.id)} | ${markdownText(endpoint.methods.join(', '))} | ${markdownCode(endpoint.url)} | ${endpoint.parameters.length} | ${markdownText(endpoint.authentication.join(', '))} | ${markdownText(endpoint.confidence)} |`);
+    }
+  }
+  if (report.graphql_operations.length > 0) {
+    lines.push('', '## GraphQL operations', '', '| ID | Type | Name | Endpoint | Confidence |', '|---|---|---|---|---|');
+    for (const operation of report.graphql_operations) {
+      lines.push(`| ${markdownText(operation.id)} | ${markdownText(operation.operation_type)} | ${markdownText(operation.operation_name || '')} | ${markdownText(operation.endpoint_id || '')} | ${markdownText(operation.confidence)} |`);
+    }
+  }
+  if (report.realtime_channels.length > 0) {
+    lines.push('', '## Realtime channels', '', '| ID | Transport | URL | Events | Confidence |', '|---|---|---|---|---|');
+    for (const channel of report.realtime_channels) {
+      lines.push(`| ${markdownText(channel.id)} | ${markdownText(channel.transport)} | ${markdownCode(channel.url || '')} | ${markdownText(channel.events.join(', '))} | ${markdownText(channel.confidence)} |`);
+    }
+  }
+  if (report.limitations.length > 0 || report.coverage.notes.length > 0) {
+    lines.push('', '## Limitations', '');
+    [...report.limitations, ...report.coverage.notes].forEach(item => lines.push(`- ${item}`));
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 function renderMarkdown(report) {
+  if (report.analysis_task === 'endpoints') return renderEndpointMarkdown(report);
   const inventory = report.inventory;
   const lines = [
     `# getjs AI analysis: ${report.target}`,
@@ -916,6 +1002,9 @@ function namespaceReport(report, batchNumber, chunk, totalBatches) {
   collectIds(namespaced.evidence);
   collectIds(namespaced.inventory);
   collectIds(namespaced.findings);
+  collectIds(namespaced.endpoints);
+  collectIds(namespaced.graphql_operations);
+  collectIds(namespaced.realtime_channels);
 
   const referenceFields = new Set([
     'evidence_ids',
@@ -947,23 +1036,44 @@ function namespaceReport(report, batchNumber, chunk, totalBatches) {
   return namespaced;
 }
 
-function mergeBatchReports(reports, manifest, run, target) {
+function mergeBatchReports(reports, manifest, run, target, task = 'full') {
   if (reports.length === 0) throw new Error('AI provider returned no batch reports');
   const uniqueStrings = values => [...new Set(values.filter(value => typeof value === 'string' && value))];
+  const coverage = {
+    files_provided: manifest.selected.length,
+    files_analyzed: manifest.selected.map(record => record.file),
+    files_skipped: [],
+    bytes_provided: manifest.selectedBytes,
+    bytes_analyzed: manifest.selectedBytes,
+    complete: manifest.skipped.length === 0,
+    notes: [`Full byte coverage completed across ${reports.length} AI analysis pass${reports.length === 1 ? '' : 'es'}.`],
+  };
+  if (task === 'endpoints') {
+    const merged = {
+      schema_version: reports[0].schema_version,
+      analysis_task: 'endpoints',
+      run,
+      target,
+      coverage,
+      evidence: reports.flatMap(report => report.evidence || []),
+      endpoints: reports.flatMap(report => report.endpoints || []),
+      graphql_operations: reports.flatMap(report => report.graphql_operations || []),
+      realtime_channels: reports.flatMap(report => report.realtime_channels || []),
+      limitations: uniqueStrings(reports.flatMap(report => report.limitations || [])),
+    };
+    if (reports.length > 1) {
+      merged.limitations.push(
+        'Large inputs were reviewed in complete byte-range passes; endpoint construction spanning chunk boundaries may require manual follow-up.',
+      );
+    }
+    return merged;
+  }
   const merged = {
     schema_version: reports[0].schema_version,
     run,
     target,
     executive_summary: uniqueStrings(reports.flatMap(report => report.executive_summary || [])),
-    coverage: {
-      files_provided: manifest.selected.length,
-      files_analyzed: manifest.selected.map(record => record.file),
-      files_skipped: [],
-      bytes_provided: manifest.selectedBytes,
-      bytes_analyzed: manifest.selectedBytes,
-      complete: manifest.skipped.length === 0,
-      notes: [`Full byte coverage completed across ${reports.length} AI analysis pass${reports.length === 1 ? '' : 'es'}.`],
-    },
+    coverage,
     evidence: reports.flatMap(report => report.evidence || []),
     inventory: {},
     findings: reports.flatMap(report => report.findings || []),
@@ -1018,50 +1128,65 @@ function deduplicateRecords(records, keyForRecord, idRemap) {
 function deduplicateMergedReport(report) {
   const idRemap = new Map();
   const lower = value => String(value ?? '').trim().toLowerCase();
-  const inventory = report.inventory;
+  const endpointKey = item => `${lower(item.transport)}|${lower(item.base_url)}|${lower(item.url)}`;
   report.evidence = deduplicateRecords(
     report.evidence,
     item => `${lower(item.file)}|${item.byte_offset}|${item.line}|${item.column}|${item.snippet}`,
     idRemap,
   );
-  inventory.endpoints = deduplicateRecords(inventory.endpoints, item => lower(item.url), idRemap);
-  inventory.graphql_operations = deduplicateRecords(
-    inventory.graphql_operations,
-    item => `${lower(item.operation_type)}|${lower(item.operation_name)}|${lower(item.document_or_hash)}`,
-    idRemap,
-  );
-  inventory.realtime_channels = deduplicateRecords(
-    inventory.realtime_channels,
-    item => `${lower(item.transport)}|${lower(item.url)}`,
-    idRemap,
-  );
-  inventory.routes_and_features = deduplicateRecords(
-    inventory.routes_and_features,
-    item => `${lower(item.kind)}|${lower(item.route_or_feature)}`,
-    idRemap,
-  );
-  inventory.data_entities = deduplicateRecords(inventory.data_entities, item => lower(item.name), idRemap);
-  inventory.secrets = deduplicateRecords(
-    inventory.secrets,
-    item => `${lower(item.type)}|${lower(item.value)}`,
-    idRemap,
-  );
-  inventory.technologies = deduplicateRecords(
-    inventory.technologies,
-    item => `${lower(item.name)}|${lower(item.version)}`,
-    idRemap,
-  );
-  inventory.third_party_integrations = deduplicateRecords(
-    inventory.third_party_integrations,
-    item => lower(item.name),
-    idRemap,
-  );
-  report.findings = deduplicateRecords(
-    report.findings,
-    item => `${lower(item.category)}|${lower(item.title)}`,
-    idRemap,
-  );
-  report.hunt_plan = deduplicateRecords(report.hunt_plan, item => lower(item.objective), idRemap);
+  if (report.analysis_task === 'endpoints') {
+    report.endpoints = deduplicateRecords(report.endpoints, endpointKey, idRemap);
+    report.graphql_operations = deduplicateRecords(
+      report.graphql_operations,
+      item => `${lower(item.operation_type)}|${lower(item.operation_name)}|${lower(item.document_or_hash)}`,
+      idRemap,
+    );
+    report.realtime_channels = deduplicateRecords(
+      report.realtime_channels,
+      item => `${lower(item.transport)}|${lower(item.url)}`,
+      idRemap,
+    );
+  } else {
+    const inventory = report.inventory;
+    inventory.endpoints = deduplicateRecords(inventory.endpoints, endpointKey, idRemap);
+    inventory.graphql_operations = deduplicateRecords(
+      inventory.graphql_operations,
+      item => `${lower(item.operation_type)}|${lower(item.operation_name)}|${lower(item.document_or_hash)}`,
+      idRemap,
+    );
+    inventory.realtime_channels = deduplicateRecords(
+      inventory.realtime_channels,
+      item => `${lower(item.transport)}|${lower(item.url)}`,
+      idRemap,
+    );
+    inventory.routes_and_features = deduplicateRecords(
+      inventory.routes_and_features,
+      item => `${lower(item.kind)}|${lower(item.route_or_feature)}`,
+      idRemap,
+    );
+    inventory.data_entities = deduplicateRecords(inventory.data_entities, item => lower(item.name), idRemap);
+    inventory.secrets = deduplicateRecords(
+      inventory.secrets,
+      item => `${lower(item.type)}|${lower(item.value)}`,
+      idRemap,
+    );
+    inventory.technologies = deduplicateRecords(
+      inventory.technologies,
+      item => `${lower(item.name)}|${lower(item.version)}`,
+      idRemap,
+    );
+    inventory.third_party_integrations = deduplicateRecords(
+      inventory.third_party_integrations,
+      item => lower(item.name),
+      idRemap,
+    );
+    report.findings = deduplicateRecords(
+      report.findings,
+      item => `${lower(item.category)}|${lower(item.title)}`,
+      idRemap,
+    );
+    report.hunt_plan = deduplicateRecords(report.hunt_plan, item => lower(item.objective), idRemap);
+  }
 
   const referenceFields = new Set([
     'evidence_ids',
@@ -1080,13 +1205,21 @@ function deduplicateMergedReport(report) {
     }
   };
   rewriteReferences(report);
-  report.executive_summary = mergeArrayValues(report.executive_summary, []);
-  report.global_limitations = mergeArrayValues(report.global_limitations, []);
+  if (report.analysis_task === 'endpoints') {
+    report.limitations = mergeArrayValues(report.limitations, []);
+  } else {
+    report.executive_summary = mergeArrayValues(report.executive_summary, []);
+    report.global_limitations = mergeArrayValues(report.global_limitations, []);
+  }
   return report;
 }
 
 async function analyzeDownloadedFiles(downloads, options = {}) {
   const settings = options.settings || resolveAISettings(options);
+  const task = settings.task || 'full';
+  if (!SUPPORTED_AI_TASKS.has(task)) {
+    throw new Error(`Unsupported AI task "${task}"; expected full or endpoints`);
+  }
   const executable = executableFromPath(settings.executable);
   if (!executable) {
     throw new Error(`AI provider executable not found or not executable: ${settings.executable}`);
@@ -1126,6 +1259,7 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
         const record = manifest.selected.find(item => item.file === chunk.file);
         const context = {
           target: options.target || '',
+          analysis_task: task,
           run,
           coverage_contract: {
             mode: 'full_file_chunked_review',
@@ -1194,11 +1328,13 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
         )
         : unwrapClaudeOutput(processResult.stdout);
       validateAgainstSchema(parsed, schema, schema);
-      assertRootReportShape(parsed);
+      assertRootReportShape(parsed, task);
       batchReports.push(namespaceReport(parsed, index, chunk, chunks.length));
     }
 
-    rawReport = deduplicateMergedReport(mergeBatchReports(batchReports, manifest, run, options.target || ''));
+    rawReport = deduplicateMergedReport(
+      mergeBatchReports(batchReports, manifest, run, options.target || '', task),
+    );
     fullCoverageContents = manifest.selected.map(record => ({
       file: record.file,
       start_byte: 0,
@@ -1210,15 +1346,25 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
     fs.rmSync(tempDirectory, { recursive: true, force: true });
   }
 
-  const report = normalizeReport(rawReport, manifest, run, options.target || '', schema, fullCoverageContents);
-  const reportPath = path.resolve(options.reportPath || path.join(manifest.workspace, 'getjs-ai-analysis.json'));
+  const report = normalizeReport(
+    rawReport,
+    manifest,
+    run,
+    options.target || '',
+    schema,
+    fullCoverageContents,
+    task,
+  );
+  const defaultReportName = task === 'endpoints' ? 'getjs-ai-endpoints.json' : 'getjs-ai-analysis.json';
+  const reportPath = path.resolve(options.reportPath || path.join(manifest.workspace, defaultReportName));
   const markdownPath = reportPath.toLowerCase().endsWith('.json')
     ? `${reportPath.slice(0, -5)}.md`
     : `${reportPath}.md`;
   writePrivateJson(reportPath, report);
   writePrivateText(markdownPath, renderMarkdown(report));
 
-  return {
+  const commonResult = {
+    task,
     provider: settings.provider,
     providerVersion: version,
     model: settings.model,
@@ -1227,18 +1373,29 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
     markdownPath,
     filesProvided: manifest.selected.length,
     filesAnalyzed: report.coverage.files_analyzed.length,
-    endpoints: report.inventory.endpoints.length,
-    secrets: report.inventory.secrets.length,
-    findings: report.findings.length,
-    huntPlanItems: report.hunt_plan.length,
+    endpoints: task === 'endpoints' ? report.endpoints.length : report.inventory.endpoints.length,
+    graphqlOperations: task === 'endpoints'
+      ? report.graphql_operations.length
+      : report.inventory.graphql_operations.length,
+    realtimeChannels: task === 'endpoints'
+      ? report.realtime_channels.length
+      : report.inventory.realtime_channels.length,
     complete: report.coverage.complete,
     providerCalls,
   };
+  if (task === 'full') {
+    commonResult.secrets = report.inventory.secrets.length;
+    commonResult.findings = report.findings.length;
+    commonResult.huntPlanItems = report.hunt_plan.length;
+  }
+  return commonResult;
 }
 
 module.exports = {
   BUILTIN_PROMPT_PATH,
   BUILTIN_SCHEMA_PATH,
+  BUILTIN_ENDPOINT_PROMPT_PATH,
+  BUILTIN_ENDPOINT_SCHEMA_PATH,
   DEFAULT_AI_CONFIG,
   analyzeDownloadedFiles,
   buildAnalysisPrompt,

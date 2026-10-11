@@ -37,9 +37,10 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Secret Scanning Pipeline** - Discover, download, and scan JavaScript with TruffleHog in one command
 - **Unredacted Evidence Reports** - Preserves complete findings in mode-`0600` JSON reports for validation
 - **Managed TruffleHog** - Installs and explicitly updates checksum-validated official releases
-- **Optional AI Security Analysis** - Sends an isolated copy of downloaded JavaScript to an authenticated Codex or Claude CLI for evidence-backed analysis
-- **Hunt-Ready Reports** - Produces strict JSON plus readable Markdown covering endpoints, parameters, GraphQL, realtime channels, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
-- **Custom Analysis Prompts** - Uses the shipped security prompt by default, with per-run or config-file prompt and model overrides
+- **Two AI Tasks** - Choose a compact endpoint inventory or the complete client-side security review
+- **AI Endpoint Reconstruction** - Correlates URLs, methods, parameters, bodies, headers, authentication clues, GraphQL, and realtime channels without producing the full security report
+- **Full AI Security Analysis** - Produces strict JSON plus readable Markdown covering endpoints, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
+- **Custom Analysis Prompts** - Uses the shipped task-specific prompt by default, with per-run or config-file prompt and model overrides
 - **Offline OpenAPI Export** - Converts an existing AI report into evidence-linked OpenAPI 3.1 JSON without another model call
 - **Self-Contained Swagger UI** - Builds a portable, interactive HTML API explorer with embedded assets and no CDN or online validator
 
@@ -189,6 +190,47 @@ rehash       # zsh only; needed after changing install locations, not every run
 npm uninstall -g getjs
 ```
 
+## Choose a Workflow
+
+Most uses fit one of these four commands:
+
+| Goal | Command |
+|------|---------|
+| Find JavaScript URLs | `getjs -u https://example.com -o js-urls.txt` |
+| Download the JavaScript | `getjs -u https://example.com --fetch-all -d ./js` |
+| Build an AI endpoint inventory | `getjs -u https://example.com --ai --ai-task endpoints -d ./js` |
+| Run the complete AI security review | `getjs -u https://example.com --ai --ai-task full -d ./js` |
+
+`--ai-task endpoints` is the focused everyday mode. It returns endpoints,
+methods, parameters, request bodies, headers, authentication clues, GraphQL,
+realtime channels, and exact evidence. It does not generate general security
+findings, secret candidates, technology inventory, or a hunt plan.
+
+`--ai-task full` is the original comprehensive analysis and remains the default
+for backward compatibility. Use it when you want DOM sinks, `postMessage`,
+client-side security findings, secrets, and prioritized follow-up work in
+addition to endpoints.
+
+Both tasks still review every selected byte. Endpoint mode normally produces a
+shorter response and avoids unrelated reasoning, but it currently uses the same
+file/chunk pass boundaries as full mode, so the runtime improvement depends on
+the provider and target. It is focused mode, not a reduced-coverage shortcut.
+
+Provider and task are separate choices:
+
+```bash
+# Codex, endpoints only
+getjs -u https://example.com --ai codex --ai-task endpoints
+
+# Claude, full security review
+getjs -u https://example.com --ai claude --ai-task full
+```
+
+Both AI tasks download first-party JavaScript automatically. Add `--crawl` for
+route-specific scripts and `--storage-state` for authenticated pages. AI can
+only analyze code that getjs collects; an endpoint absent from the collected
+JavaScript cannot be reconstructed from static analysis.
+
 ## Quick Start
 
 ```bash
@@ -210,24 +252,29 @@ getjs -u https://example.com --fetch-all -d ./js-files
 # Discover, download, and scan all JS in one pipeline
 getjs -u https://example.com --scan-secrets -d ./js-files
 
-# Download and analyze all discovered JS with the configured AI provider
-getjs -u https://example.com --ai -d ./js-files
+# Recommended for endpoint hunting: compact AI endpoint inventory
+getjs -u https://example.com --ai --ai-task endpoints -d ./js-files
 
-# Select Claude for this run and save reports at an explicit path
+# Complete client-side security analysis (also the default when --ai-task is omitted)
+getjs -u https://example.com --ai --ai-task full -d ./js-files
+
+# Select Claude for an endpoint-only run and save reports at an explicit path
 getjs -u https://example.com --ai claude \
-  --ai-report ./evidence/example-ai.json \
+  --ai-task endpoints \
+  --ai-report ./evidence/example-endpoints.json \
   -d ./js-files
 
 # Generate OpenAPI during the same AI run (no additional model call)
 getjs -u https://example.com --ai \
-  --ai-report ./evidence/example-ai.json \
+  --ai-task endpoints \
+  --ai-report ./evidence/example-endpoints.json \
   --openapi ./evidence/example.openapi.json \
   --openapi-html ./evidence/example-swagger.html \
   -d ./js-files
 
 # Or regenerate it later, entirely offline
 getjs openapi \
-  --input ./evidence/example-ai.json \
+  --input ./evidence/example-endpoints.json \
   --html ./evidence/example-swagger.html
 
 # Install TruffleHog automatically as part of the first pipeline run
@@ -354,15 +401,28 @@ Verification is disabled by default because it can make outbound requests contai
 
 #### AI Analysis Options
 
-`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. By default, AI mode infers the target's registrable domain and saves/analyzes only JavaScript from that apex and its subdomains; browser-observed Google, analytics, consent, video, and other third-party scripts are excluded. Use `--filter-domain` to supply the engagement scope explicitly or `--ai-include-third-party` to opt back into vendor analysis. The built-in prompt requests evidence-backed reconnaissance and client-side security analysis, while the bundled JSON Schema keeps output stable for downstream tools.
+`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. By default, AI mode infers the target's registrable domain and saves/analyzes only JavaScript from that apex and its subdomains; browser-observed Google, analytics, consent, video, and other third-party scripts are excluded. Use `--filter-domain` to supply the engagement scope explicitly or `--ai-include-third-party` to opt back into vendor analysis.
+
+Choose the output with `--ai-task`:
+
+- `endpoints` creates a compact endpoint report containing HTTP/API endpoints,
+  methods, parameters, request bodies, headers, authentication clues, GraphQL,
+  realtime channels, evidence, and coverage.
+- `full` creates the comprehensive security report. It includes the endpoint
+  inventory plus secrets, client-side findings, technologies, data entities,
+  routes/features, and a prioritized hunt plan. This is the default.
+
+Each task has its own shipped prompt and strict JSON Schema. `--prompt` replaces
+the instructions for the selected task but retains that task's schema.
 
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-a, --ai [provider]` | Analyze with `codex` or `claude` | Provider from config; `codex` initially |
+| `--ai-task <task>` | Select `endpoints` or `full` output | `full` |
 | `--ai-model <model>` | Override the configured provider model | Provider default |
 | `--prompt <file>` | Replace the built-in analysis instructions for this run | Built-in prompt |
 | `--ai-config <file>` | Read AI settings from another JSON file | Platform config path |
-| `--ai-report <file>` | JSON report path for one target; Markdown is written beside it | `<download-dir>/getjs-ai-analysis.json` |
+| `--ai-report <file>` | JSON report path for one target; concise Markdown is written beside it | Task-specific name in the download directory |
 | `--ai-report-dir <dir>` | Per-target JSON and Markdown report directory | `<download-dir>/getjs-ai-analysis/` in multi-target mode |
 | `--ai-timeout <seconds>` | Provider timeout for each full-review pass | 900 |
 | `--ai-concurrency <n>` | Concurrent provider runs for multiple targets | 1 |
@@ -375,17 +435,24 @@ Verification is disabled by default because it can make outbound requests contai
 | `--openapi-html <file>` | Generate a self-contained Swagger UI page from this run's OpenAPI document | Disabled |
 | `--swagger-try-it-out` | Permit live requests from generated Swagger UI; requires `--openapi-html` | Disabled |
 
-Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
+Endpoint reports default to `<download-dir>/getjs-ai-endpoints.json`; full reports
+default to `<download-dir>/getjs-ai-analysis.json`. Both receive a matching
+Markdown file. OpenAPI generation accepts either JSON format.
+
+Full reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The full security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
 
 Every byte of every selected file is supplied to the provider. Inputs larger than one safe provider request are divided into byte-range passes and merged into one report; getjs fails the AI stage if any pass fails. Valid same-origin source maps are downloaded by default, allowing embedded original sources to be reviewed alongside production bundles. Chunked review guarantees byte coverage, although a data flow crossing a chunk boundary can still require manual follow-up.
 
-Both reports are created with mode `0600` because they can contain complete secrets and sensitive source excerpts. The provider may process the downloaded code remotely under its own product settings. Use `--ai` only when that is permitted by scope and policy.
+Both report types are created with mode `0600` because evidence can contain
+sensitive source excerpts or literal request material. The provider may process
+the downloaded code remotely under its own product settings. Use `--ai` only
+when that is permitted by scope and policy.
 
 #### AI Configuration Command
 
 ```text
 getjs ai init [-o <config.json>] [--force]
-getjs ai status [--provider codex|claude] [--ai-config <file>]
+getjs ai status [--provider codex|claude] [--task full|endpoints] [--ai-config <file>]
 ```
 
 `getjs ai init` creates a private configuration file at `~/.config/getjs/config.json` on a typical Linux installation. The built-in defaults work without creating a file when the selected executable is already on `PATH`.
@@ -394,6 +461,7 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
 {
   "ai": {
     "provider": "codex",
+    "task": "full",
     "prompt": "builtin",
     "timeoutSeconds": 900,
     "maxFiles": 250,
@@ -408,17 +476,17 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
 }
 ```
 
-Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt shipped with getjs. Command-line values override config values. `getjs ai status` resolves the executable and displays its version, model, prompt, schema, and active config before you run a target.
+Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt and schema shipped for the active task. Set `"task": "endpoints"` to make compact endpoint analysis your personal default. Command-line values override config values. `getjs ai status --task endpoints` resolves the executable and displays its version, model, endpoint prompt, schema, and active config before you run a target.
 
 The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries. getjs embeds each source range directly in provider input so analysis does not depend on model-initiated filesystem commands. For Codex, getjs creates a private temporary writable `CODEX_HOME` under the user's cache directory, copies an existing file-based `auth.json` into it with mode `0600`, and removes the temporary home after the run. This lets Codex write required process and socket state while the staged JavaScript files remain read-only. Set `providers.codex.home` when the authenticated source profile is somewhere other than `CODEX_HOME` or `~/.codex`. Final reports are written by getjs to the requested report path.
 
 #### OpenAPI Generation Command
 
 ```text
-getjs openapi --input <getjs-ai-analysis.json> [--output <openapi.json>] [--html <swagger.html>] [--title <title>] [--swagger-try-it-out]
+getjs openapi --input <getjs-ai-report.json> [--output <openapi.json>] [--html <swagger.html>] [--title <title>] [--swagger-try-it-out]
 ```
 
-This command is deterministic and offline: it reads the canonical AI JSON report and does not start Codex, Claude, Chromium, or a network request. When `--output` is omitted, it writes `<input-name>.openapi.json` beside the report. The same conversion can run immediately after analysis with `--openapi <file>`; that convenience flag reuses the completed report and does not incur a second AI call.
+This command is deterministic and offline: it reads either a compact endpoint report or a full AI report and does not start Codex, Claude, Chromium, or a network request. When `--output` is omitted, it writes `<input-name>.openapi.json` beside the report. The same conversion can run immediately after analysis with `--openapi <file>`; that convenience flag reuses the completed report and does not incur a second AI call.
 
 Resolvable in-scope URLs with standard HTTP methods become OpenAPI 3.1 paths and operations. The converter maps path, query, header, cookie, JSON-body, form, and multipart parameters, while retaining auth clues, confidence, endpoint IDs, evidence IDs, notes, inferred request shapes, and response clues in `x-getjs-*` extensions. Same-apex API subdomains use operation-level `servers`. Dynamic URLs, unsupported or missing methods, and off-scope endpoints are preserved under `x-getjs-unresolved-endpoints` rather than guessed or discarded.
 
@@ -533,6 +601,7 @@ Output format:
     },
     "downloads": { "completed": 0, "failed": [] },
     "aiAnalysis": {
+      "task": "full",
       "provider": "codex",
       "model": null,
       "reportPath": "/work/js-downloads/getjs-ai-analysis.json",
@@ -562,7 +631,10 @@ Output format:
 }
 ```
 
-`aiAnalysis` is present only with `--ai`. In multi-target mode, a failed provider run is recorded as `aiError` for that target while other targets continue.
+`aiAnalysis` is present only with `--ai`. Endpoint mode sets `"task":
+"endpoints"` and omits the `secrets`, `findings`, and `huntPlanItems` counters.
+In multi-target mode, a failed provider run is recorded as `aiError` for that
+target while other targets continue.
 
 ### Resume / Incremental Mode
 
@@ -699,33 +771,39 @@ getjs ai status --provider codex
 getjs ai status --provider claude
 ```
 
-Run the built-in security analysis:
+Run AI analysis:
 
 ```bash
-# Uses the configured provider and implies --fetch-all
-getjs -u https://target.com --ai -d ./target-js
+# Focused endpoint inventory (recommended when endpoints are all you need)
+getjs -u https://target.com --ai --ai-task endpoints -d ./target-js
 
-# Explicit provider and model
-getjs -u https://target.com --ai codex --ai-model <model> -d ./target-js
+# Complete security review; --ai-task full is optional because it is the default
+getjs -u https://target.com --ai --ai-task full -d ./target-js
 
-# Claude with an explicit private report location
+# Explicit provider, task, and model
+getjs -u https://target.com --ai codex --ai-task endpoints --ai-model <model> -d ./target-js
+
+# Claude endpoint analysis with an explicit private report location
 getjs -u https://target.com --ai claude \
-  --ai-report ./evidence/target-analysis.json \
+  --ai-task endpoints \
+  --ai-report ./evidence/target-endpoints.json \
   -d ./target-js
 
 # Multi-target analysis, with provider calls deliberately bounded
 getjs -f targets.txt --ai codex \
+  --ai-task endpoints \
   --ai-concurrency 2 \
   --ai-report-dir ./evidence/ai \
   -d ./target-js
 ```
 
-Use a custom prompt for a narrower job such as authorization-route mapping or framework-specific analysis:
+Use a custom prompt while retaining the selected task's strict output shape:
 
 ```bash
 getjs -u https://target.com --ai \
+  --ai-task endpoints \
   --prompt ./prompts/my-analysis.md \
-  --ai-report ./evidence/custom-analysis.json \
+  --ai-report ./evidence/custom-endpoints.json \
   -d ./target-js
 ```
 
@@ -824,12 +902,12 @@ async function main() {
     console.log(`Secret candidates: ${secretScan.total}`);
 
     const aiAnalysis = await analyzeDownloadedFiles(results, {
-      settings: resolveAISettings({ ai: 'codex' }),
+      settings: resolveAISettings({ ai: 'codex', aiTask: 'endpoints' }),
       target: 'https://example.com',
       workspace: './js-files',
-      reportPath: './js-files/getjs-ai-analysis.json',
+      reportPath: './js-files/getjs-ai-endpoints.json',
     });
-    console.log(`AI findings: ${aiAnalysis.findings}`);
+    console.log(`AI endpoints: ${aiAnalysis.endpoints}`);
 
     const openapi = generateOpenAPIFile(
       aiAnalysis.reportPath,
@@ -850,7 +928,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.6                          │
+│                         getjs v2.7                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │

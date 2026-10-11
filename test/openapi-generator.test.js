@@ -143,6 +143,22 @@ function report() {
   };
 }
 
+function endpointReport() {
+  const full = report();
+  return {
+    schema_version: '1.0',
+    analysis_task: 'endpoints',
+    run: full.run,
+    target: full.target,
+    coverage: full.coverage,
+    evidence: full.evidence,
+    endpoints: full.inventory.endpoints,
+    graphql_operations: [],
+    realtime_channels: [],
+    limitations: full.global_limitations,
+  };
+}
+
 test('OpenAPI generation maps inferred operations and preserves uncertainty', () => {
   const document = generateOpenAPI(report());
 
@@ -168,6 +184,14 @@ test('OpenAPI generation maps inferred operations and preserves uncertainty', ()
     ['missing_http_method', 'outside_target_scope', 'unresolved_dynamic_url'],
   );
   assert.equal(document['x-getjs'].generated_operations, 3);
+});
+
+test('OpenAPI generation accepts compact endpoint-only AI reports', () => {
+  const document = generateOpenAPI(endpointReport());
+  assert.equal(document.openapi, '3.1.0');
+  assert.equal(document['x-getjs'].generated_operations, 3);
+  assert.ok(document.paths['/api/users/{userId}'].get);
+  assert.ok(document.paths['/api/users'].post);
 });
 
 test('equivalent templated paths are canonicalized without invalid path parameters', () => {
@@ -243,6 +267,19 @@ test('file generation validates input, writes privately, and refuses to overwrit
       () => generateOpenAPIFile(path.join(directory, 'invalid.json')),
       /missing required field schema_version/,
     );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('file generation validates compact endpoint-only reports', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-openapi-endpoints-'));
+  try {
+    const input = path.join(directory, 'endpoints.json');
+    fs.writeFileSync(input, JSON.stringify(endpointReport()));
+    const result = generateOpenAPIFile(input);
+    assert.equal(result.operations, 3);
+    assert.equal(JSON.parse(fs.readFileSync(result.outputPath, 'utf8')).openapi, '3.1.0');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { version } = require('../package.json');
-const { filterUrls, matchDomainPattern } = require('../bin/getjs');
+const { aiReportPathForTarget, filterUrls, matchDomainPattern } = require('../bin/getjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const cli = path.join(projectRoot, 'bin', 'getjs.js');
@@ -27,6 +27,7 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /-V, --version/);
   assert.match(defaultHelp.stdout, /-u, --url <url>/);
   assert.match(defaultHelp.stdout, /--ai \[provider\]/);
+  assert.match(defaultHelp.stdout, /--ai-task <task>/);
   assert.match(defaultHelp.stdout, /--prompt <file>/);
   assert.match(defaultHelp.stdout, /--ai-max-inline-size <kb>/);
   assert.match(defaultHelp.stdout, /--ai-include-third-party/);
@@ -78,6 +79,32 @@ test('AI mode defaults downloads to the target registrable domain', () => {
     'https://api.allerganaccessma.com/runtime.js',
     'https://allerganaccessma.com/root.js',
   ]);
+});
+
+test('AI task selection is validated and requires AI mode', () => {
+  const withoutAI = runCli(['-u', 'https://example.com/', '--ai-task', 'endpoints']);
+  assert.equal(withoutAI.status, 1);
+  assert.match(withoutAI.stderr, /AI analysis options require --ai/);
+
+  const invalid = runCli(['-u', 'https://example.com/', '--ai', '--ai-task', 'summary']);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Unsupported AI task.*full or endpoints/);
+});
+
+test('endpoint task uses distinct default report names', () => {
+  const downloadDir = path.join(os.tmpdir(), 'getjs-report-name-test');
+  const single = aiReportPathForTarget('https://example.com/', {
+    downloadDir,
+    aiSettings: { task: 'endpoints' },
+  });
+  assert.equal(single, path.join(downloadDir, 'getjs-ai-endpoints.json'));
+
+  const multi = aiReportPathForTarget('https://example.com/app', {
+    downloadDir,
+    aiReportDir: path.join(downloadDir, 'reports'),
+    aiSettings: { task: 'endpoints' },
+  }, true);
+  assert.match(multi, /\.endpoints\.json$/);
 });
 
 test('auth command documents secure interactive storage-state capture', () => {

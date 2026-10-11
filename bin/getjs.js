@@ -377,14 +377,17 @@ async function scanDownloads(downloads, options) {
 
 function aiReportPathForTarget(targetUrl, options, multipleTargets = false) {
   if (options.aiReport) return path.resolve(options.aiReport);
+  const task = options.aiSettings?.task || options.aiTask || 'full';
   if (options.aiReportDir || multipleTargets) {
     const reportDirectory = path.resolve(
       options.aiReportDir || path.join(options.downloadDir, 'getjs-ai-analysis'),
     );
-    const filename = sanitizeDomainFilename(targetUrl).replace(/\.txt$/i, '.json');
+    const suffix = task === 'endpoints' ? '.endpoints.json' : '.json';
+    const filename = sanitizeDomainFilename(targetUrl).replace(/\.txt$/i, suffix);
     return path.join(reportDirectory, filename);
   }
-  return path.resolve(options.downloadDir, 'getjs-ai-analysis.json');
+  const filename = task === 'endpoints' ? 'getjs-ai-endpoints.json' : 'getjs-ai-analysis.json';
+  return path.resolve(options.downloadDir, filename);
 }
 
 async function analyzeDownloads(targetUrl, downloads, options, multipleTargets = false) {
@@ -394,7 +397,7 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
   const settings = options.aiSettings || resolveAISettings(options);
   const reportPath = aiReportPathForTarget(targetUrl, options, multipleTargets);
   log(
-    `[*] Analyzing ${downloads.length} downloaded JavaScript files with ${settings.provider}...`,
+    `[*] Running ${settings.task} AI analysis on ${downloads.length} downloaded JavaScript files with ${settings.provider}...`,
     options.silent,
   );
   const result = await analyzeDownloadedFiles(downloads, {
@@ -409,11 +412,19 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
       options.silent,
     ),
   });
-  log(
-    `[*] AI analysis (${result.providerCalls} passes): ${result.endpoints} endpoints, `
-      + `${result.secrets} secret candidates, ${result.findings} security findings`,
-    options.silent,
-  );
+  if (result.task === 'endpoints') {
+    log(
+      `[*] AI endpoint analysis (${result.providerCalls} passes): ${result.endpoints} HTTP/API endpoints, `
+        + `${result.graphqlOperations} GraphQL operations, ${result.realtimeChannels} realtime channels`,
+      options.silent,
+    );
+  } else {
+    log(
+      `[*] AI analysis (${result.providerCalls} passes): ${result.endpoints} endpoints, `
+        + `${result.secrets} secret candidates, ${result.findings} security findings`,
+      options.silent,
+    );
+  }
   log(`[!] Private AI JSON report saved to: ${result.reportPath} (mode 0600)`, options.silent);
   log(`[!] Private AI Markdown report saved to: ${result.markdownPath} (mode 0600)`, options.silent);
   if (options.openapi) {
@@ -777,6 +788,7 @@ const collectCommand = program
   .option('--update-scanner', 'Update managed TruffleHog to the latest release before scanning')
   .option('--scanner-version <version>', 'Managed TruffleHog version used with --install-scanner/--update-scanner')
   .option('-a, --ai [provider]', 'Analyze downloaded JavaScript with codex or claude (uses configured provider when omitted)')
+  .option('--ai-task <task>', 'AI task: full security analysis or endpoints only (full|endpoints)')
   .option('--ai-model <model>', 'Override the configured AI model')
   .option('--prompt <file>', 'Use a custom AI analysis prompt instead of the built-in prompt')
   .option('--ai-config <file>', 'Path to getjs AI configuration JSON')
@@ -804,6 +816,7 @@ const collectCommand = program
       + '  getjs scanner <install|status|update>\n'
       + '\nAI analysis:\n'
       + '  getjs -u https://example.com --ai codex\n'
+      + '  getjs -u https://example.com --ai codex --ai-task endpoints\n'
       + '  getjs ai <init|status>\n'
       + '\nOffline OpenAPI generation:\n'
       + '  getjs openapi --input getjs-ai-analysis.json',
@@ -837,6 +850,7 @@ const collectCommand = program
     }
     const aiOnlyOptions = [
       options.aiModel,
+      options.aiTask,
       options.prompt,
       options.aiConfig,
       options.aiReport,
@@ -1008,16 +1022,19 @@ aiCommand
   .command('status')
   .description('Show the selected AI provider, executable, model, prompt, and config')
   .option('--provider <provider>', 'Provider to inspect (codex or claude)')
+  .option('--task <task>', 'AI task to inspect (full or endpoints)')
   .option('--ai-config <file>', 'Path to getjs AI configuration JSON')
   .option('--ai-model <model>', 'Override the configured model for this check')
   .option('--prompt <file>', 'Override the configured prompt for this check')
   .action(options => {
     const status = getAIStatus({
       ai: options.provider,
+      aiTask: options.task,
       aiConfig: options.aiConfig,
       aiModel: options.aiModel,
       prompt: options.prompt,
     });
+    console.log(`Task: ${status.task}`);
     console.log(`Provider: ${status.provider}`);
     console.log(`Executable: ${status.executable || `${status.configuredExecutable} (not found)`}`);
     console.log(`Version: ${status.version || 'unknown'}`);
@@ -1031,9 +1048,9 @@ aiCommand
 
 program
   .command('openapi')
-  .description('Generate OpenAPI 3.1 JSON from an existing getjs AI analysis report without another AI run')
+  .description('Generate OpenAPI without another AI run')
   .version(VERSION)
-  .requiredOption('-i, --input <file>', 'Existing getjs AI analysis JSON report')
+  .requiredOption('-i, --input <file>', 'Existing getjs full or endpoint-only AI JSON report')
   .option('-o, --output <file>', 'Output path (default: replace .json with .openapi.json)')
   .option('--title <title>', 'Override the generated OpenAPI document title')
   .option('--html <file>', 'Write a self-contained Swagger UI HTML page')

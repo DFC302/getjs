@@ -4,7 +4,11 @@ const path = require('node:path');
 const psl = require('psl');
 
 const { version: GETJS_VERSION } = require('../package.json');
-const { BUILTIN_SCHEMA_PATH, validateAgainstSchema } = require('./ai-analyzer');
+const {
+  BUILTIN_ENDPOINT_SCHEMA_PATH,
+  BUILTIN_SCHEMA_PATH,
+  validateAgainstSchema,
+} = require('./ai-analyzer');
 const { writePrivateJson } = require('./secret-scanner');
 
 const HTTP_METHODS = new Set(['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace']);
@@ -402,8 +406,11 @@ function generateOpenAPI(report, options = {}) {
   if (!report || typeof report !== 'object' || Array.isArray(report)) {
     throw new Error('AI analysis report must be a JSON object');
   }
-  if (!report.inventory || !Array.isArray(report.inventory.endpoints)) {
-    throw new Error('AI analysis report must contain inventory.endpoints');
+  const endpoints = report.analysis_task === 'endpoints'
+    ? report.endpoints
+    : report.inventory?.endpoints;
+  if (!Array.isArray(endpoints)) {
+    throw new Error('AI report must contain endpoints or inventory.endpoints');
   }
   const target = targetDetails(report.target);
   const paths = {};
@@ -413,7 +420,7 @@ function generateOpenAPI(report, options = {}) {
   const usedOperationIds = new Set();
   let operations = 0;
 
-  for (const endpoint of report.inventory.endpoints) {
+  for (const endpoint of endpoints) {
     const location = endpointLocation(endpoint, target);
     if (!location.path) {
       unresolved.push(unresolvedRecord(endpoint, location.reason));
@@ -472,7 +479,7 @@ function generateOpenAPI(report, options = {}) {
       unresolved_endpoints: unresolved.length,
       limitations: unique([
         'Paths, methods, parameters, bodies, authentication, and response clues are inferred from client-side code and may be incomplete or unreachable.',
-        ...(report.global_limitations || []),
+        ...(report.analysis_task === 'endpoints' ? report.limitations || [] : report.global_limitations || []),
       ]),
     },
     'x-getjs-unresolved-endpoints': unresolved,
@@ -644,7 +651,10 @@ function generateOpenAPIFile(inputPath, outputPath = null, options = {}) {
   } catch (error) {
     throw new Error(`Unable to read AI analysis report ${resolvedInput}: ${error.message}`);
   }
-  const schema = JSON.parse(fs.readFileSync(BUILTIN_SCHEMA_PATH, 'utf8'));
+  const schemaPath = report?.analysis_task === 'endpoints'
+    ? BUILTIN_ENDPOINT_SCHEMA_PATH
+    : BUILTIN_SCHEMA_PATH;
+  const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
   validateAgainstSchema(report, schema, schema);
   const document = generateOpenAPI(report, options);
   const resolvedOutput = path.resolve(outputPath || defaultOpenAPIPath(resolvedInput));

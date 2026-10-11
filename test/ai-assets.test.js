@@ -6,6 +6,8 @@ const test = require('node:test');
 const projectRoot = path.resolve(__dirname, '..');
 const promptPath = path.join(projectRoot, 'prompts', 'default-security-analysis.md');
 const schemaPath = path.join(projectRoot, 'schemas', 'ai-analysis.schema.json');
+const endpointPromptPath = path.join(projectRoot, 'prompts', 'default-endpoint-analysis.md');
+const endpointSchemaPath = path.join(projectRoot, 'schemas', 'ai-endpoints.schema.json');
 
 test('default AI prompt covers core reconnaissance and client-side security analysis', () => {
   const prompt = fs.readFileSync(promptPath, 'utf8');
@@ -32,6 +34,43 @@ test('AI analysis schema is strict and exposes a reusable evidence ledger', () =
   assert.ok(schema.required.includes('inventory'));
   assert.ok(schema.required.includes('findings'));
   assert.ok(schema.required.includes('hunt_plan'));
+
+  const incompleteObjects = [];
+  const visit = (value, location = '#') => {
+    if (!value || typeof value !== 'object') return;
+    if (value.type === 'object' && value.properties) {
+      const required = new Set(value.required || []);
+      const missing = Object.keys(value.properties).filter(key => !required.has(key));
+      if (missing.length > 0) incompleteObjects.push({ location, missing });
+    }
+    for (const [key, child] of Object.entries(value)) visit(child, `${location}/${key}`);
+  };
+  visit(schema);
+  assert.deepEqual(incompleteObjects, []);
+});
+
+test('endpoint AI assets stay focused and use a compact strict schema', () => {
+  const prompt = fs.readFileSync(endpointPromptPath, 'utf8');
+  for (const expected of [
+    'fetch',
+    'XMLHttpRequest',
+    'GraphQL',
+    'WebSocket',
+    'generic library default',
+    'exact excerpts',
+  ]) {
+    assert.match(prompt, new RegExp(expected, 'i'));
+  }
+  assert.match(prompt, /Do not emit general security findings/i);
+
+  const schema = JSON.parse(fs.readFileSync(endpointSchemaPath, 'utf8'));
+  assert.equal(schema.properties.analysis_task.const, 'endpoints');
+  assert.ok(schema.required.includes('endpoints'));
+  assert.ok(schema.required.includes('graphql_operations'));
+  assert.ok(schema.required.includes('realtime_channels'));
+  assert.equal(Object.hasOwn(schema.properties, 'findings'), false);
+  assert.equal(Object.hasOwn(schema.properties, 'inventory'), false);
+  assert.equal(Object.hasOwn(schema.properties, 'hunt_plan'), false);
 
   const incompleteObjects = [];
   const visit = (value, location = '#') => {

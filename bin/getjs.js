@@ -22,6 +22,8 @@ const {
   resolveAISettings,
 } = require('../src/ai-analyzer');
 const { generateOpenAPIFile } = require('../src/openapi-generator');
+const { importTraffic, writeAPIInventory } = require('../src/api-inventory');
+const { runAuthDiff } = require('../src/auth-diff');
 const { version: VERSION } = require('../package.json');
 
 function parseInteger(value, optionName, minimum) {
@@ -323,8 +325,106 @@ function createCollectorOptions(targetUrl, options, browser = null) {
     maxPages: options.maxPages,
     sourceMaps: options.sourceMaps,
     scopeDomains: effectiveFilterDomains(options, targetUrl),
+    entrypoints: options.entrypoint || [],
+    captureApi: true,
+    sessionIdentity: options.sessionIdentity,
+    sessionRole: options.sessionRole,
+    sessionLabel: options.sessionLabel,
     browser,
   };
+}
+
+function writePrivateArtifact(filePath, content) {
+  ensureParentDirectory(filePath);
+  const temporary = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, content);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    fs.renameSync(temporary, filePath);
+    fs.chmodSync(filePath, 0o600);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
+function materializeAnalysisArtifacts(collector, downloads, options, targetUrl) {
+  if (!options.ai) return [];
+  const artifactDirectory = path.resolve(options.downloadDir, 'getjs-collected-artifacts');
+  const results = [];
+  collector.getInlineArtifacts().forEach((artifact, index) => {
+    const extension = artifact.kind === 'inline_script' ? '.js' : '.json';
+    const filename = `${artifact.kind}-${String(index + 1).padStart(4, '0')}-${artifact.sha256.slice(0, 12)}${extension}`;
+    const filePath = path.join(artifactDirectory, filename);
+    writePrivateArtifact(filePath, artifact.content);
+    results.push({
+      url: `${artifact.pageUrl || targetUrl}#getjs-${artifact.kind}-${index + 1}`,
+      finalUrl: artifact.frameUrl || artifact.pageUrl || targetUrl,
+      path: filePath,
+      size: artifact.size,
+      contentType: artifact.contentType,
+      sha256: artifact.sha256,
+      source: artifact.kind,
+    });
+  });
+
+  const inventory = collector.getAPIInventory();
+  if (inventory && inventory.observations.length > 0) {
+    const content = `${JSON.stringify(inventory.toJSON(collector.getMetadata().coverage), null, 2)}\n`;
+    const filePath = path.join(artifactDirectory, 'observed-api-inventory.json');
+    writePrivateArtifact(filePath, content);
+    results.push({
+      url: `${targetUrl}#getjs-observed-api-inventory`,
+      finalUrl: targetUrl,
+      path: filePath,
+      size: Buffer.byteLength(content),
+      contentType: 'application/json',
+      sha256: crypto.createHash('sha256').update(content).digest('hex'),
+      source: 'observed_api_inventory',
+    });
+  }
+  downloads.results.push(...results);
+  return results;
+}
+
+function apiInventoryPathForTarget(targetUrl, options, multipleTargets = false) {
+  if (typeof options.apiInventory === 'string') return path.resolve(options.apiInventory);
+  if (multipleTargets || options.apiReportDir) {
+    const directory = path.resolve(options.apiReportDir || path.join(options.downloadDir, 'getjs-api-inventory'));
+    return path.join(directory, sanitizeDomainFilename(targetUrl).replace(/\.txt$/i, '.api.json'));
+  }
+  return path.resolve(options.downloadDir, 'getjs-api-inventory.json');
+}
+
+function shouldWriteAPIInventory(options) {
+  return Boolean(options.apiInventory || options.apiReportDir || options.ai || options.har?.length || options.burp?.length);
+}
+
+function importTrafficForCollector(collector, options) {
+  const failures = importTraffic(collector.getAPIInventory(), {
+    harFiles: options.har || [],
+    burpFiles: options.burp || [],
+  });
+  if (failures.length > 0) {
+    throw new Error(failures.map(failure => (
+      `${failure.type} import failed for ${failure.file}: ${failure.error}`
+    )).join('; '));
+  }
+  return failures;
+}
+
+function finalizeCoverage(metadata, downloads, aiAnalysis) {
+  metadata.coverage.assets.downloaded = downloads.results.filter(item => !item.source).length;
+  metadata.coverage.assets.download_failed = downloads.errors.length;
+  if (aiAnalysis) {
+    metadata.coverage.assets.ai_artifacts_analyzed = aiAnalysis.filesAnalyzed;
+    metadata.coverage.assets.ai_artifacts_skipped = aiAnalysis.filesProvided - aiAnalysis.filesAnalyzed;
+  }
+  return metadata.coverage;
 }
 
 function createDownloader(collector, options) {
@@ -360,7 +460,7 @@ async function downloadForTarget(collector, urls, options, targetUrl) {
 }
 
 async function scanDownloads(downloads, options) {
-  log(`[*] Scanning ${downloads.length} downloaded JavaScript files for secrets...`, options.silent);
+  log(`[*] Scanning ${downloads.length} collected files for secrets...`, options.silent);
   if (!options.verifySecrets) {
     log('[*] Credential verification is disabled; use --verify-secrets to enable network verification', options.silent);
   }
@@ -392,12 +492,12 @@ function aiReportPathForTarget(targetUrl, options, multipleTargets = false) {
 
 async function analyzeDownloads(targetUrl, downloads, options, multipleTargets = false) {
   if (!downloads || downloads.length === 0) {
-    throw new Error(`AI analysis for ${targetUrl} requires at least one successful JavaScript download`);
+    throw new Error(`AI analysis for ${targetUrl} requires at least one collected JavaScript or analysis artifact`);
   }
   const settings = options.aiSettings || resolveAISettings(options);
   const reportPath = aiReportPathForTarget(targetUrl, options, multipleTargets);
   log(
-    `[*] Running ${settings.task} AI analysis on ${downloads.length} downloaded JavaScript files with ${settings.provider}...`,
+    `[*] Running ${settings.task} AI analysis on ${downloads.length} collected artifacts with ${settings.provider}...`,
     options.silent,
   );
   const result = await analyzeDownloadedFiles(downloads, {
@@ -493,6 +593,7 @@ async function collectJS(options) {
     log('[*] Starting browser...', options.silent);
 
     const jsUrls = await collector.collect(targetUrl);
+    importTrafficForCollector(collector, options);
 
     // Apply domain filters
     const filteredUrls = filterUrls(jsUrls, options, targetUrl);
@@ -512,8 +613,10 @@ async function collectJS(options) {
     }
 
     const downloads = await downloadForTarget(collector, filteredUrls, options, targetUrl);
+    const networkDownloadCount = downloads.results.length;
+    const analysisArtifacts = materializeAnalysisArtifacts(collector, downloads, options, targetUrl);
     if (options.fetchAll || options.fetchOne) {
-      log(`[*] Downloaded: ${downloads.results.length} files, Failed: ${downloads.errors.length}`, options.silent);
+      log(`[*] Downloaded: ${networkDownloadCount} files, Failed: ${downloads.errors.length}`, options.silent);
       if (downloads.errors.length > 0) {
         downloads.errors.forEach(error => log(`[!] Download failed: ${error.url}: ${error.error}`, options.silent));
         process.exitCode = 2;
@@ -528,6 +631,16 @@ async function collectJS(options) {
       : null;
 
     const metadata = collector.getMetadata();
+    finalizeCoverage(metadata, downloads, aiAnalysis);
+    let apiInventoryPath = null;
+    if (shouldWriteAPIInventory(options)) {
+      apiInventoryPath = writeAPIInventory(
+        apiInventoryPathForTarget(targetUrl, options),
+        collector.getAPIInventory(),
+        metadata.coverage,
+      );
+      log(`[!] Private API inventory saved to: ${apiInventoryPath} (mode 0600)`, options.silent);
+    }
     metadata.warnings.forEach(warning => log(`[!] ${warning}`, options.silent));
 
     if (options.output) {
@@ -547,9 +660,11 @@ async function collectJS(options) {
           urls: filteredUrls,
           metadata,
           downloads: {
-            completed: downloads.results.length,
+            completed: networkDownloadCount,
+            analysisArtifacts: analysisArtifacts.length,
             failed: downloads.errors,
           },
+          ...(apiInventoryPath && { apiInventory: apiInventoryPath }),
           ...(secretScan && { secretScan }),
           ...(aiAnalysis && { aiAnalysis }),
           error: null,
@@ -560,7 +675,7 @@ async function collectJS(options) {
       filteredUrls.forEach(url => console.log(url));
     }
 
-    return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, aiAnalysis, error: null };
+    return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, aiAnalysis, apiInventoryPath, error: null };
   } finally {
     await collector.close();
   }
@@ -615,6 +730,7 @@ async function collectMultipleJS(urls, options) {
         try {
           log(`[*] Collecting: ${targetUrl}`, options.silent);
           const jsUrls = await collector.collect(targetUrl);
+          importTrafficForCollector(collector, options);
           const filteredUrls = filterUrls(jsUrls, options, targetUrl);
           log(`[*] Found ${jsUrls.length} JS files for ${targetUrl} (${filteredUrls.length} in download scope)`, options.silent);
 
@@ -627,11 +743,29 @@ async function collectMultipleJS(urls, options) {
             log(`[*] Downloads for ${targetUrl}: ${downloads.results.length} completed, ${downloads.errors.length} failed`, options.silent);
           }
 
+          const networkDownloadCount = downloads.results.length;
+          const analysisArtifacts = materializeAnalysisArtifacts(collector, downloads, options, targetUrl);
+          const metadata = collector.getMetadata();
+          finalizeCoverage(metadata, downloads, null);
+          let apiInventoryPath = null;
+          if (shouldWriteAPIInventory(options)) {
+            apiInventoryPath = writeAPIInventory(
+              apiInventoryPathForTarget(targetUrl, options, true),
+              collector.getAPIInventory(),
+              metadata.coverage,
+            );
+            log(`[!] Private API inventory saved to: ${apiInventoryPath} (mode 0600)`, options.silent);
+          }
+
           return {
             url: targetUrl,
             urls: filteredUrls,
-            metadata: collector.getMetadata(),
+            metadata,
             downloads,
+            networkDownloadCount,
+            analysisArtifactCount: analysisArtifacts.length,
+            apiInventoryPath,
+            apiInventory: collector.getAPIInventory(),
             error: null,
           };
         } catch (error) {
@@ -664,6 +798,12 @@ async function collectMultipleJS(urls, options) {
 
     if (options.ai) {
       await analyzeMultipleDownloads(allResults, options);
+      for (const result of allResults.values()) {
+        finalizeCoverage(result.metadata, result.downloads, result.aiAnalysis);
+        if (result.apiInventoryPath && result.apiInventory) {
+          writeAPIInventory(result.apiInventoryPath, result.apiInventory, result.metadata.coverage);
+        }
+      }
     }
 
     await handleMultiOutput(allResults, options);
@@ -715,9 +855,11 @@ async function handleMultiOutput(allResults, options) {
         urls: result.urls,
         metadata: result.metadata,
         downloads: {
-          completed: result.downloads.results.length,
+          completed: result.networkDownloadCount ?? result.downloads.results.length,
+          analysisArtifacts: result.analysisArtifactCount || 0,
           failed: result.downloads.errors,
         },
+        ...(result.apiInventoryPath && { apiInventory: result.apiInventoryPath }),
         ...(result.secretScan && { secretScan: result.secretScan }),
         ...(result.aiAnalysis && { aiAnalysis: result.aiAnalysis }),
         ...(result.aiError && { aiError: result.aiError }),
@@ -761,6 +903,7 @@ const collectCommand = program
   .option('--max-file-size <mb>', 'Maximum script size parsed or downloaded in MB', parsePositiveInteger('max-file-size'), 10)
   .option('--crawl', 'Visit safe same-origin GET links to discover route-specific scripts')
   .option('--max-pages <n>', 'Maximum additional pages visited with --crawl', parsePositiveInteger('max-pages'), 10)
+  .option('--entrypoint <path...>', 'Explicit same-origin page entry points to visit (for example /app /dashboard)')
   .option('-A, --user-agent <string>', 'Custom User-Agent string')
   .option('-x, --proxy <url>', 'Proxy server URL (e.g., http://127.0.0.1:8080)')
   .option('-c, --cookies <file|string>', 'Cookie file (JSON) or raw cookie string (e.g., "name=val; name2=val2")')
@@ -769,6 +912,13 @@ const collectCommand = program
   .option('-H, --header <header...>', 'Extra HTTP header (format: "Name: Value")')
   .option('--local-storage <entry...>', 'Set localStorage entry (format: "key=value")')
   .option('--auth-domain <pattern...>', 'Domains allowed to receive custom headers/localStorage (default: target origin)')
+  .option('--session-identity <value>', 'Record the authenticated identity label attached to observed API traffic')
+  .option('--session-role <value>', 'Record the authenticated role label attached to observed API traffic')
+  .option('--session-label <value>', 'Record a session label such as unauthenticated or candidate')
+  .option('--api-inventory [file]', 'Write same-origin XHR/fetch/SSE/WebSocket inventory (default: <download-dir>/getjs-api-inventory.json)')
+  .option('--api-report-dir <dir>', 'Directory for per-target API inventories in multi-target mode')
+  .option('--har <file...>', 'Import one or more HAR files into the scoped API inventory')
+  .option('--burp <file...>', 'Import Burp XML history or raw HTTP request files into the scoped API inventory')
   .option('--fetch-all', 'Download all discovered JS files')
   .option('--fetch-one <url>', 'Download a specific JS file')
   .option('-d, --download-dir <dir>', 'Directory for downloaded files', './js-downloads')
@@ -817,6 +967,7 @@ const collectCommand = program
       + '\nAI analysis:\n'
       + '  getjs -u https://example.com --ai codex\n'
       + '  getjs -u https://example.com --ai codex --ai-task endpoints\n'
+      + '  getjs -u https://example.com --entrypoint /app --api-inventory --ai codex --ai-task endpoints\n'
       + '  getjs ai <init|status>\n'
       + '\nOffline OpenAPI generation:\n'
       + '  getjs openapi --input getjs-ai-analysis.json',
@@ -829,6 +980,9 @@ const collectCommand = program
     }
     if (options.fetchAll && options.fetchOne) {
       throw new Error('Use either --fetch-all or --fetch-one, not both');
+    }
+    if (typeof options.apiInventory === 'string' && options.apiReportDir) {
+      throw new Error('Use either a custom --api-inventory file or --api-report-dir, not both');
     }
     const scannerOnlyOptions = [
       options.secretReport,
@@ -929,6 +1083,9 @@ const collectCommand = program
     }
     if (urls.length > 1 && options.openapi) {
       throw new Error('--openapi is only valid for a single target; use getjs openapi for existing per-target reports');
+    }
+    if (urls.length > 1 && typeof options.apiInventory === 'string') {
+      throw new Error('A custom --api-inventory file is only valid for one target; use --api-report-dir for multiple targets');
     }
 
     if (urls.length === 1) {
@@ -1072,6 +1229,52 @@ program
           + `(live requests ${result.swaggerUI.tryItOut ? 'enabled' : 'disabled'})`,
       );
     }
+  });
+
+program
+  .command('auth-diff')
+  .description('Safely compare observed GET/HEAD endpoints across unauthenticated and candidate sessions')
+  .version(VERSION)
+  .requiredOption('-u, --url <url>', 'Target origin used to enforce same-origin replay')
+  .requiredOption('-i, --input <file>', 'getjs API inventory containing observed requests')
+  .option('-o, --output <file>', 'Private JSON comparison report', './getjs-auth-diff.json')
+  .option('--candidate-storage-state <file>', 'Candidate Playwright storage-state JSON')
+  .option('--candidate-cookies <file|string>', 'Candidate cookie file or raw cookie string')
+  .option('--candidate-header <header...>', 'Candidate header (format: "Name: Value")')
+  .option('--candidate-label <value>', 'Candidate session label', 'candidate')
+  .option('--all-safe-get', 'Replay all observed safe GET/HEAD requests, not only role-significant paths')
+  .option('--max-endpoints <n>', 'Maximum requests replayed per session', parsePositiveInteger('max-endpoints'), 25)
+  .option('--max-response-kb <n>', 'Maximum response bytes hashed in memory', parsePositiveInteger('max-response-kb'), 1024)
+  .option('--delay <ms>', 'Delay between endpoint comparison pairs', parseNonNegativeInteger('delay'), 250)
+  .option('-t, --timeout <seconds>', 'Per-request timeout in seconds', parsePositiveInteger('timeout'), 30)
+  .action(async (options) => {
+    if (options.candidateStorageState && options.candidateCookies) {
+      throw new Error('Use either --candidate-storage-state or --candidate-cookies, not both');
+    }
+    const candidateHeaders = parseHeaders(options.candidateHeader);
+    if (!options.candidateStorageState && !options.candidateCookies && Object.keys(candidateHeaders).length === 0) {
+      throw new Error('Provide candidate authentication with --candidate-storage-state, --candidate-cookies, or --candidate-header');
+    }
+    const result = await runAuthDiff({
+      url: validateUrl(options.url),
+      input: options.input,
+      output: options.output,
+      allSafeGet: options.allSafeGet,
+      maxEndpoints: options.maxEndpoints,
+      maxBodyBytes: options.maxResponseKb * 1024,
+      delayMs: options.delay,
+      timeout: options.timeout * 1000,
+      baseline: { headers: {}, timeout: options.timeout * 1000 },
+      candidate: {
+        storageState: options.candidateStorageState,
+        cookies: options.candidateCookies,
+        headers: candidateHeaders,
+        label: options.candidateLabel,
+        timeout: options.timeout * 1000,
+      },
+    });
+    console.log(`Wrote private authorization differential report: ${result.outputPath}`);
+    console.log(`${result.report.comparisons.length} safe endpoint comparisons completed; response bodies were not stored.`);
   });
 
 // Since collect is the default command, make top-level help describe the

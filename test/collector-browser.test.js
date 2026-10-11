@@ -26,6 +26,7 @@ function startFixtureServer() {
     if (pathname === '/app/index.html') {
       response.setHeader('content-type', 'text/html');
       response.end(`<!doctype html>
+        <meta name="api-base" content="/api">
         <link rel="modulepreload" href="./preload.js">
         <link rel="prefetch" href="./prefetched.js">
         <script type="module" src="./main.js"></script>
@@ -37,6 +38,7 @@ function startFixtureServer() {
         <a href="/logout">must not crawl</a>
         <script>
           if (false) window.loadScript('/inline-classic.js');
+          fetch('/api/data?view=summary').catch(() => {});
           fetch('/hang').catch(() => {});
           navigator.serviceWorker.register('/sw.js').catch(() => {});
           setTimeout(() => {
@@ -45,6 +47,20 @@ function startFixtureServer() {
             document.body.appendChild(script);
           }, 25);
         </script>`);
+      return;
+    }
+
+    if (pathname === '/explicit-entry') {
+      response.setHeader('content-type', 'text/html');
+      response.end(`<!doctype html>
+        <script type="application/json">{"recruiterSearch":"/app/user/recruiter/search.json"}</script>
+        <script>fetch('/app/user/recruiter/search.json?keyword=a').catch(() => {})</script>`);
+      return;
+    }
+
+    if (pathname === '/api/data' || pathname === '/app/user/recruiter/search.json') {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ ok: true }));
       return;
     }
 
@@ -147,6 +163,11 @@ test('collector continues with active requests and recursively discovers depende
     maxFiles: 50,
     crawlLinks: true,
     maxPages: 5,
+    entrypoints: ['/explicit-entry'],
+    captureApi: true,
+    sessionIdentity: 'candidate@example.test',
+    sessionRole: 'candidate',
+    sessionLabel: 'candidate-session',
   });
 
   try {
@@ -181,12 +202,25 @@ test('collector continues with active requests and recursively discovers depende
     assert.ok(metadata.redirects.some(url => url.endsWith('/app/index.html')));
     assert.ok(metadata.staticDiscovered >= 3);
     assert.ok(metadata.sourceMaps.some(url => new URL(url).pathname === '/app/main.js.map'));
-    assert.equal(metadata.pagesCrawled, 2);
+    assert.equal(metadata.pagesCrawled, 3);
     assert.equal(fixture.requestedPaths.has('/admin'), true);
     assert.equal(fixture.requestedPaths.has('/logout'), false);
     assert.equal(paths.has('/should-not-load.js'), false);
     assert.equal(paths.has('/app/data.json'), false);
     assert.equal(paths.has('/false-positive.js'), false);
+    assert.equal(metadata.coverage.pages.entrypoints[0], '/explicit-entry');
+    assert.ok(metadata.coverage.pages.visits.some(item => new URL(item.final_url).pathname === '/explicit-entry'));
+    assert.ok(metadata.coverage.assets.inline_artifacts >= 3);
+
+    const inventory = collector.getAPIInventory().toJSON(metadata.coverage);
+    const data = inventory.endpoints.find(item => new URL(item.url).pathname === '/api/data');
+    const recruiter = inventory.endpoints.find(item => new URL(item.url).pathname === '/app/user/recruiter/search.json');
+    assert.ok(data);
+    assert.ok(recruiter);
+    assert.deepEqual(recruiter.role_signals, ['recruiter']);
+    assert.equal(recruiter.authorization_review_recommended, true);
+    assert.equal(recruiter.auth_contexts[0].role, 'candidate');
+    assert.deepEqual(recruiter.parameters, [{ name: 'keyword', location: 'query' }]);
   } finally {
     await collector.close();
     for (const socket of fixture.sockets) socket.destroy();

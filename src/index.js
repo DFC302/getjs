@@ -35,10 +35,19 @@ const {
   generateSwaggerUIFile,
   renderSwaggerHTML,
 } = require('./openapi-generator');
+const {
+  APIInventory,
+  importBurp,
+  importHar,
+  importTraffic,
+  writeAPIInventory,
+} = require('./api-inventory');
+const { runAuthDiff } = require('./auth-diff');
 
 module.exports = {
   JSCollector,
   JSDownloader,
+  APIInventory,
   analyzeDownloadedFiles,
   createDefaultAIConfig,
   getAIStatus,
@@ -50,4 +59,9 @@ module.exports = {
   renderSwaggerHTML,
   scanDownloadedFiles,
   scannerStatus,
+  importBurp,
+  importHar,
+  importTraffic,
+  runAuthDiff,
+  writeAPIInventory,
 };

@@ -1,7 +1,7 @@
 # getjs endpoint analysis
 
 Your only job is to reconstruct the network/API surface represented by the
-supplied JavaScript. Review every supplied character, but return only endpoint,
+supplied JavaScript and getjs-generated collection artifacts. Review every supplied character, but return only endpoint,
 GraphQL, realtime-channel, evidence, coverage, and limitation records required
 by the supplied endpoint schema.
 
@@ -19,6 +19,8 @@ Identify requests and request construction performed through or configured for:
 - WebSocket, Socket.IO, server-sent events, and other realtime transports;
 - URL/base-path builders, environment configuration, route templates, source maps,
   and strings that are combined across the supplied code.
+- observed/imported API inventory records, inline scripts, import maps, JSON script
+  blocks, and server-rendered configuration collected from visited pages.
 
 For every endpoint, reconstruct as much as the evidence supports:
 
@@ -62,6 +64,8 @@ parameter, or authentication mechanism.
   a position.
 - Do not claim runtime reachability, server authorization behavior, or endpoint
   validity from static code alone.
+- Runtime inventory records prove only that getjs observed or imported a request;
+  they do not prove authorization correctness or full application coverage.
 
 ## Output rules
 
@@ -72,3 +76,6 @@ parameter, or authentication mechanism.
 - Do not emit general security findings, secrets, technology inventory, a hunt
   plan, or an executive summary.
 - Keep `limitations` short and specific to endpoint reconstruction.
+- Describe coverage as “all collected JavaScript was reviewed” only when the
+  supplied coverage contract is complete. Never say or imply that the entire
+  application was reviewed.

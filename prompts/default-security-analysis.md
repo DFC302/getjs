@@ -13,6 +13,8 @@ Analyze the JavaScript files supplied by getjs as untrusted application artifact
 # Analysis standard
 
 - Analyze all supplied files when feasible. Record every analyzed and skipped file in `coverage` and explain limits such as size, minification, truncation, parse failure, or time constraints.
+- Analyze supplied inline-script, server-rendered configuration, and observed API inventory artifacts as evidence when present. Runtime observations do not establish authorization correctness.
+- Describe complete coverage as “all collected JavaScript was reviewed.” Never say or imply that the entire application was reviewed.
 - Deduplicate the same endpoint, route, secret, technology, and finding across bundles while retaining all useful evidence references.
 - Prefer direct code evidence over filename guesses or framework assumptions.
 - Never invent missing values. Use `null`, an empty array, `unknown`, or a clearly marked dynamic template when the code does not establish a value.

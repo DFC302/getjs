@@ -19,6 +19,13 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
   - **Service Workers** (detects SW registrations and scripts)
 - **Recursive Dependency Parsing** - Follows static imports, dynamic string imports, workers, and JavaScript URL literals with depth/file/size limits
 - **Optional Route Crawling** - Visits bounded, same-origin GET links while avoiding common logout and destructive routes
+- **Explicit Entry Points** - Visits one or more known application routes such as `/app` even when public navigation does not link to them
+- **Passive API Inventory** - Records all same-origin XHR, fetch, SSE, and WebSocket connections observed by the browser regardless of response content type
+- **HAR and Burp Import** - Merges scoped HAR entries, Burp XML history, or raw HTTP requests into the API inventory
+- **Split Coverage** - Reports page visits, JavaScript/assets, and observed/imported APIs separately
+- **Session Context** - Attaches user-supplied identity, role, and session labels to each observed endpoint
+- **Authorization Leads** - Flags `/admin/`, `/recruiter/`, `/staff/`, `/internal/`, and related paths for manual authorization review
+- **Safe Authorization Diff** - An explicit subcommand can compare previously observed same-origin GET/HEAD requests across unauthenticated and candidate sessions without storing response bodies
 - **Authentication Support** - Access protected pages via:
   - Browser cookie exports, Netscape cookie jars, or raw cookie strings
   - Playwright storage-state files containing cookies and per-origin localStorage
@@ -192,14 +199,17 @@ npm uninstall -g getjs
 
 ## Choose a Workflow
 
-Most uses fit one of these four commands:
+Most uses fit one of these commands:
 
 | Goal | Command |
 |------|---------|
 | Find JavaScript URLs | `getjs -u https://example.com -o js-urls.txt` |
 | Download the JavaScript | `getjs -u https://example.com --fetch-all -d ./js` |
 | Build an AI endpoint inventory | `getjs -u https://example.com --ai --ai-task endpoints -d ./js` |
+| Include a hidden application route | `getjs -u https://example.com --entrypoint /app --api-inventory` |
+| Import proxy/browser history | `getjs -u https://example.com --har traffic.har --burp burp-history.xml --api-inventory` |
 | Run the complete AI security review | `getjs -u https://example.com --ai --ai-task full -d ./js` |
+| Compare safe requests across sessions | `getjs auth-diff -u https://example.com -i ./js/getjs-api-inventory.json --candidate-storage-state candidate.json` |
 
 `--ai-task endpoints` is the focused everyday mode. It returns endpoints,
 methods, parameters, request bodies, headers, authentication clues, GraphQL,
@@ -211,7 +221,9 @@ for backward compatibility. Use it when you want DOM sinks, `postMessage`,
 client-side security findings, secrets, and prioritized follow-up work in
 addition to endpoints.
 
-Both tasks still review every selected byte. Endpoint mode normally produces a
+Both tasks still review every selected byte. Inline scripts, JSON script blocks,
+relevant server-rendered configuration, and the passive API inventory are added
+as private analysis artifacts when present. Endpoint mode normally produces a
 shorter response and avoids unrelated reasoning, but it currently uses the same
 file/chunk pass boundaries as full mode, so the runtime improvement depends on
 the provider and target. It is focused mode, not a reduced-coverage shortcut.
@@ -349,6 +361,53 @@ cat urls.txt | getjs [options]
 | `-H, --header <header...>` | Extra HTTP headers | - |
 | `--local-storage <entry...>` | Set localStorage entries | - |
 | `--auth-domain <pattern...>` | Expand header/localStorage scope beyond target origin | Target origin only |
+| `--session-identity <value>` | Label the identity associated with observed API requests | - |
+| `--session-role <value>` | Label the role associated with observed API requests | - |
+| `--session-label <value>` | Label the session, for example `candidate` | Inferred authenticated/unauthenticated label |
+
+Identity and role values are analyst-supplied context. getjs records them but
+does not independently prove which account or role the server assigned.
+
+#### Entry Points, API Inventory, and Imports
+
+Use `--entrypoint` for authenticated or unlinked application roots that the
+normal page and bounded crawler may never reach:
+
+```bash
+getjs -u https://apply.example.com \
+  --storage-state candidate.json \
+  --session-role candidate \
+  --entrypoint /app /account \
+  --api-inventory \
+  --ai --ai-task endpoints \
+  -d ./example-results
+```
+
+Each entry point must resolve to a safe URL on the target origin. It is visited
+even without `--crawl`; `--crawl` additionally follows bounded same-origin links.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--entrypoint <path...>` | One or more explicit same-origin pages to visit | - |
+| `--api-inventory [file]` | Write the passive/imported API inventory | `<download-dir>/getjs-api-inventory.json` |
+| `--api-report-dir <dir>` | Per-target API report directory in multi-target mode | `<download-dir>/getjs-api-inventory/` |
+| `--har <file...>` | Import HAR files and keep only requests matching the target origin | - |
+| `--burp <file...>` | Import Burp XML history or raw HTTP request files | - |
+
+API inventory files are mode `0600`. Header and request-body values are not
+stored; header names and parameter names are retained. URLs are retained as
+observed, so query-string values can still be sensitive. Imported traffic is
+scope-filtered to the target's exact origin.
+
+Coverage is intentionally split:
+
+- `pages` records planned, visited, and failed pages plus explicit entry points.
+- `assets` records observed JavaScript, source maps, inline artifacts, download
+  success/failure, and AI-selected artifacts.
+- `api` records browser observations, imported observations, unique endpoint
+  shapes, and WebSocket connections.
+
+These are evidence counts, not a claim of complete application coverage.
 
 #### Auth Capture Command
 
@@ -369,6 +428,42 @@ getjs auth -u <url> -o <storage-state.json> [options]
 | `--force` | Overwrite an existing state file | - |
 
 Captured state is written with mode `0600`. Keep the browser open after logging in, return to the terminal, and press Enter to save it.
+
+#### Authorization Differential Command
+
+`getjs auth-diff` is deliberately separate from passive collection. It replays
+requests only when explicitly invoked, accepts only previously observed
+same-origin `GET`/`HEAD` requests, excludes destructive/logout-like paths,
+disables redirects, caps the request count, and stores hashes rather than
+response bodies. By default it tests only role-significant paths; add
+`--all-safe-get` to compare every eligible observed request.
+
+```bash
+getjs auth-diff \
+  -u https://apply.example.com \
+  -i ./results/getjs-api-inventory.json \
+  --candidate-storage-state candidate.json \
+  --candidate-label candidate \
+  -o ./results/getjs-auth-diff.json
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-u, --url <url>` | Target origin used to enforce replay scope | Required |
+| `-i, --input <file>` | Existing getjs API inventory | Required |
+| `-o, --output <file>` | Private comparison report | `./getjs-auth-diff.json` |
+| `--candidate-storage-state <file>` | Candidate Playwright session | One candidate auth option required |
+| `--candidate-cookies <file\|string>` | Candidate cookies | - |
+| `--candidate-header <header...>` | Candidate authorization header(s) | - |
+| `--all-safe-get` | Include non-role-significant safe GET/HEAD requests | Disabled |
+| `--max-endpoints <n>` | Maximum requests per session | 25 |
+| `--max-response-kb <n>` | Maximum response bytes hashed in memory | 1024 KB |
+| `--delay <ms>` | Delay between endpoint comparison pairs | 250 ms |
+
+A difference is a lead, not proof of broken access control. In particular,
+`candidate_access_to_role_significant_path` means the candidate received a 2xx
+where the baseline did not; the response data and intended authorization still
+require manual verification.
 
 #### Download Options
 
@@ -401,7 +496,7 @@ Verification is disabled by default because it can make outbound requests contai
 
 #### AI Analysis Options
 
-`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. By default, AI mode infers the target's registrable domain and saves/analyzes only JavaScript from that apex and its subdomains; browser-observed Google, analytics, consent, video, and other third-party scripts are excluded. Use `--filter-domain` to supply the engagement scope explicitly or `--ai-include-third-party` to opt back into vendor analysis.
+`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider an isolated copy of the successfully downloaded files plus collected inline/configuration and API-inventory artifacts for that target. By default, AI mode infers the target's registrable domain and saves/analyzes only JavaScript from that apex and its subdomains; browser-observed Google, analytics, consent, video, and other third-party scripts are excluded. Use `--filter-domain` to supply the engagement scope explicitly or `--ai-include-third-party` to opt back into vendor analysis.
 
 Choose the output with `--ai-task`:
 
@@ -414,6 +509,8 @@ Choose the output with `--ai-task`:
 
 Each task has its own shipped prompt and strict JSON Schema. `--prompt` replaces
 the instructions for the selected task but retains that task's schema.
+Observed/imported API endpoints are also merged into the validated AI inventory
+deterministically, so a model omission cannot remove browser/proxy evidence.
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -442,6 +539,11 @@ Markdown file. OpenAPI generation accepts either JSON format.
 Full reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The full security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
 
 Every byte of every selected file is supplied to the provider. Inputs larger than one safe provider request are divided into byte-range passes and merged into one report; getjs fails the AI stage if any pass fails. Valid same-origin source maps are downloaded by default, allowing embedded original sources to be reviewed alongside production bundles. Chunked review guarantees byte coverage, although a data flow crossing a chunk boundary can still require manual follow-up.
+
+When selection limits skip nothing, reports say: “All collected JavaScript was
+reviewed within the configured domain and analysis scope.” This refers only to
+JavaScript that getjs collected and selected. It never means that the entire
+application, every route, or every server endpoint was reviewed.
 
 Both report types are created with mode `0600` because evidence can contain
 sensitive source excerpts or literal request material. The provider may process
@@ -928,7 +1030,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.7                          │
+│                         getjs v2.8                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │
@@ -947,6 +1049,9 @@ main().catch(console.error);
 │  ├── Recursive module/import/worker extraction               │
 │  ├── Scroll-triggered lazy loading                           │
 │  ├── Optional bounded same-origin route crawling             │
+│  ├── Explicit entry-point visits and page coverage            │
+│  ├── Same-origin XHR/fetch/SSE/WebSocket API inventory        │
+│  ├── Inline script and server-configuration collection        │
 │  ├── WebSocket monitoring                                    │
 │  ├── Service Worker extraction                               │
 │  └── URL normalization and deduplication                     │
@@ -970,6 +1075,11 @@ main().catch(console.error);
 │  ├── Strict JSON Schema and evidence-reference validation    │
 │  ├── Built-in or user-supplied analysis prompt               │
 │  └── Mode-0600 canonical JSON and derived Markdown reports   │
+├─────────────────────────────────────────────────────────────┤
+│  Traffic/Auth Analysis                                       │
+│  ├── HAR, Burp XML, and raw-request import                   │
+│  ├── Role-significant path classification                    │
+│  └── Explicit bounded GET/HEAD session differential testing  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -985,14 +1095,17 @@ main().catch(console.error);
 4. **DOM Extraction** - Extracts scripts, deferred sources, preloads, prefetches, and inline references from the main page and frames
 5. **Scroll Triggering** - Scrolls the page to trigger lazy-loaded content
 6. **Interaction Triggering** - Hovers over elements to trigger lazy loading
-7. **Optional Route Crawl** - Visits bounded, safe-looking same-origin links without clicking controls
-8. **Module Extraction** - Parses inline and external bundles with import-map awareness and safety limits
-9. **Service Worker Extraction** - Detects inline registrations and registered workers through Playwright
-10. **Normalization** - Converts URLs to absolute form and deduplicates
-11. **Filtering and Downloads** - Applies domain filters before authenticated downloads
-12. **Optional Secret Scan** - Runs TruffleHog against files downloaded by the current invocation
-13. **Optional AI Analysis** - Copies only the selected target's downloads into a temporary workspace, invokes Codex or Claude with bounded permissions, validates the result, and creates JSON and Markdown reports
-14. **Output** - Returns URLs plus redirect, failure, warning, download, scan, and AI report metadata in JSON mode
+7. **Entry Points and Optional Crawl** - Visits explicit application roots and optionally follows bounded, safe-looking same-origin links without clicking controls
+8. **API Observation** - Records same-origin XHR/fetch/SSE/WebSocket traffic and attaches the declared session context
+9. **Inline Configuration Collection** - Preserves inline scripts, JSON script blocks, and relevant rendered metadata/data attributes for AI review
+10. **Module Extraction** - Parses inline and external bundles with import-map awareness and safety limits
+11. **Service Worker Extraction** - Detects inline registrations and registered workers through Playwright
+12. **Optional Traffic Import** - Adds target-origin HAR or Burp observations to the API inventory
+13. **Normalization** - Converts URLs to absolute form and deduplicates
+14. **Filtering and Downloads** - Applies domain filters before authenticated downloads
+15. **Optional Secret Scan** - Runs TruffleHog against files selected by the current invocation
+16. **Optional AI Analysis** - Copies selected downloads and collection artifacts into a temporary workspace, invokes Codex or Claude with bounded permissions, validates the result, and creates JSON and Markdown reports
+17. **Output** - Returns URLs plus separate page/asset/API coverage and report metadata in JSON mode
 
 ## Exit Status
 
@@ -1009,6 +1122,9 @@ main().catch(console.error);
 - **Heavily Obfuscated Loaders** - Custom loaders using eval() or complex string manipulation may evade detection
 - **Encrypted WebSocket Payloads** - If JS URLs are encrypted in WS messages, they won't be detected
 - **State Explosion** - No finite crawler can exercise every application state; `--crawl` is intentionally bounded and does not click controls
+- **Observed API Coverage** - The API inventory includes only traffic exercised by visited pages or supplied through imports; it cannot enumerate unseen server routes
+- **Role Labels Are Declarative** - Session identity and role labels come from the operator and are not verified against server-side account data
+- **Differential Checks Are Leads** - Status/body-hash differences do not establish intended authorization or vulnerability impact
 - **Computed Chunk Names** - Bundler URLs assembled entirely at runtime may require the corresponding feature to execute
 - **Static Candidates** - Recursive parsing intentionally reports plausible references even when they later return `404`; use `--no-recursive` for runtime-only results
 - **Secret Scanner Coverage** - TruffleHog scans downloaded files only; undiscovered chunks and runtime-only configuration remain outside the report
@@ -1033,6 +1149,10 @@ main().catch(console.error);
 - [x] ~~Automatic same-origin source map discovery~~ ✅ Implemented
 - [x] ~~Offline OpenAPI 3.1 generation from AI reports~~ ✅ Implemented
 - [x] ~~Self-contained Swagger UI HTML generation~~ ✅ Implemented
+- [x] ~~Same-origin browser API inventory with HAR/Burp import~~ ✅ Implemented
+- [x] ~~Explicit application entry points and split page/asset/API coverage~~ ✅ Implemented
+- [x] ~~Inline script and server-rendered configuration analysis~~ ✅ Implemented
+- [x] ~~Session context, role-path flags, and safe authorization differential checks~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Integration with waybackurls for historical JS discovery
 

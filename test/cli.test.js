@@ -35,8 +35,31 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /--openapi-html <file>/);
   assert.match(defaultHelp.stdout, /--swagger-try-it-out/);
   assert.match(defaultHelp.stdout, /--no-source-maps/);
+  assert.match(defaultHelp.stdout, /--entrypoint <path\.\.\.>/);
+  assert.match(defaultHelp.stdout, /--api-inventory \[file\]/);
+  assert.match(defaultHelp.stdout, /--har <file\.\.\.>/);
+  assert.match(defaultHelp.stdout, /--burp <file\.\.\.>/);
+  assert.match(defaultHelp.stdout, /--session-role <value>/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
   assert.match(defaultHelp.stdout, /getjs openapi --input/);
+});
+
+test('auth-diff exposes bounded safe replay controls and requires candidate authentication', () => {
+  const help = runCli(['auth-diff', '-h']);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /GET\/HEAD/);
+  assert.match(help.stdout, /--candidate-storage-state <file>/);
+  assert.match(help.stdout, /--all-safe-get/);
+  assert.match(help.stdout, /--max-endpoints <n>/);
+  assert.match(help.stdout, /--delay <ms>/);
+
+  const missingAuth = runCli([
+    'auth-diff',
+    '-u', 'https://example.com/',
+    '-i', 'missing.json',
+  ]);
+  assert.equal(missingAuth.status, 1);
+  assert.match(missingAuth.stderr, /Provide candidate authentication/);
 });
 
 test('OpenAPI subcommand documents offline report conversion', () => {

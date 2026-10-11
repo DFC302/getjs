@@ -425,6 +425,7 @@ test('chunk merge deduplicates inventory and rewrites references', () => {
         { id: 'P1', url: '/api/users', methods: ['GET'], evidence_ids: ['E1'], notes: [] },
         { id: 'P2', url: '/api/users', methods: ['POST'], evidence_ids: ['E2'], notes: ['second pass'] },
         { id: 'P3', url: '/api/users', base_url: 'https://api.example.test', methods: ['GET'], evidence_ids: ['E1'], notes: [] },
+        { id: 'P4', url: '/app/user/recruiter/search.json', methods: ['GET'], evidence_ids: ['E1'], notes: [] },
       ],
       graphql_operations: [], realtime_channels: [], routes_and_features: [], data_entities: [], secrets: [],
       technologies: [], third_party_integrations: [],
@@ -434,12 +435,13 @@ test('chunk merge deduplicates inventory and rewrites references', () => {
   };
   deduplicateMergedReport(report);
   assert.equal(report.evidence.length, 1);
-  assert.equal(report.inventory.endpoints.length, 2);
+  assert.equal(report.inventory.endpoints.length, 3);
   assert.deepEqual(report.inventory.endpoints[0].methods, ['GET', 'POST']);
   assert.deepEqual(report.inventory.endpoints[0].evidence_ids, ['E1']);
   assert.deepEqual(report.findings[0].related_inventory_ids, ['P1']);
   assert.deepEqual(report.hunt_plan[0].related_ids, ['P1', 'F1']);
   assert.deepEqual(report.executive_summary, ['same']);
+  assert.match(report.inventory.endpoints[2].notes[0], /Role-significant path \(recruiter\)/);
 });
 
 test('manifest limits are deterministic and symlinks cannot escape the workspace', () => {
@@ -572,9 +574,18 @@ test('--ai performs collect, download, structured analysis, and JSON reporting',
     assert.equal(result.status, 0, result.stderr);
     const output = JSON.parse(result.stdout)[target];
     assert.equal(output.downloads.completed, 1, '--ai should imply --fetch-all');
+    assert.equal(output.downloads.analysisArtifacts, 1, 'observed API inventory should be included in AI input');
+    assert.equal(output.metadata.coverage.api.unique_endpoints, 1);
+    assert.equal(output.metadata.coverage.assets.downloaded, 1);
+    assert.equal(output.metadata.coverage.assets.ai_artifacts_analyzed, 2);
+    assert.equal(fs.statSync(output.apiInventory).mode & 0o777, 0o600);
+    assert.ok(fs.existsSync(path.join(downloadDir, 'getjs-collected-artifacts', 'observed-api-inventory.json')));
     assert.equal(output.aiAnalysis.endpoints, 1);
     assert.equal(output.aiAnalysis.reportPath, reportPath);
     assert.ok(fs.existsSync(reportPath));
+    const aiReport = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+    assert.ok(aiReport.inventory.endpoints[0].evidence_ids.some(id => id.startsWith('OBS-EVID-')));
+    assert.ok(aiReport.inventory.endpoints[0].response_clues.some(item => /Observed HTTP status 404/.test(item)));
     assert.ok(fs.existsSync(reportPath.replace(/\.json$/, '.md')));
     assert.equal(output.aiAnalysis.openapi.outputPath, openapiPath);
     assert.equal(output.aiAnalysis.openapi.operations, 1);

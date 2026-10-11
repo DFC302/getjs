@@ -17,3 +17,10 @@ getjs-ai-analysis.md
 getjs-ai-analysis/
 getjs-ai-analysis-*.json
 getjs-ai-analysis-*.md
+
+# API/session reports may contain sensitive URLs and behavioral fingerprints
+getjs-api-inventory.json
+getjs-api-inventory/
+*.api.json
+getjs-auth-diff.json
+getjs-collected-artifacts/

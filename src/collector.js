@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { version: packageVersion } = require('../package.json');
+const { APIInventory } = require('./api-inventory');
 
 function matchDomainPattern(hostname, pattern) {
   const normalizedHost = String(hostname || '').toLowerCase();
@@ -80,6 +81,12 @@ class JSCollector {
       maxPages: options.maxPages ?? 10,
       sourceMaps: options.sourceMaps !== false,
       scopeDomains: Array.isArray(options.scopeDomains) ? options.scopeDomains : [],
+      entrypoints: Array.isArray(options.entrypoints) ? options.entrypoints : [],
+      captureApi: options.captureApi === true,
+      sessionIdentity: options.sessionIdentity || null,
+      sessionRole: options.sessionRole || null,
+      sessionLabel: options.sessionLabel || null,
+      maxInlineArtifactSize: options.maxInlineArtifactSize ?? 1024 * 1024,
     };
 
     this.jsUrls = new Set();
@@ -98,6 +105,15 @@ class JSCollector {
     this.initializedPages = new WeakSet();
     this.pageInitializationTasks = new WeakMap();
     this.importMap = { imports: {} };
+    this.apiInventory = null;
+    this.inlineArtifacts = [];
+    this.inlineArtifactHashes = new Set();
+    this.inlineArtifactsSkipped = 0;
+    this.pageCoverage = {
+      planned: [],
+      visited: [],
+      failed: [],
+    };
     this.metadata = {
       initialUrl: null,
       finalUrl: null,
@@ -205,6 +221,12 @@ class JSCollector {
         this.authDomains = [];
         this.authOrigins = [target.origin];
       }
+      this.apiInventory = new APIInventory(this.targetUrl, {
+        authenticated: Boolean(this.options.cookies || this.options.storageState || Object.keys(this.options.headers).length),
+        identity: this.options.sessionIdentity,
+        role: this.options.sessionRole,
+        label: this.options.sessionLabel,
+      });
     }
 
     if (sharedBrowser) {
@@ -512,6 +534,7 @@ class JSCollector {
 
     const initialization = (async () => {
       page.on('websocket', (webSocket) => {
+        if (this.options.captureApi) this.apiInventory?.observeWebSocket(webSocket, page.url() || this.targetUrl);
         const inspectFrame = event => this.extractPayloadUrls(event.payload, page.url() || this.targetUrl, 'WebSocket');
         webSocket.on('framereceived', inspectFrame);
         webSocket.on('framesent', inspectFrame);
@@ -566,6 +589,11 @@ class JSCollector {
 
   async setupInterceptors(targetUrl) {
     this.context.on('request', (request) => {
+      if (this.options.captureApi) {
+        let pageUrl = null;
+        try { pageUrl = request.frame().url(); } catch {}
+        this.apiInventory?.observeRequest(request, pageUrl);
+      }
       if (request.resourceType() === 'script') {
         let baseUrl = targetUrl;
         try {
@@ -585,6 +613,7 @@ class JSCollector {
     });
 
     this.context.on('response', (response) => {
+      if (this.options.captureApi) this.apiInventory?.observeResponse(response);
       // response.allHeaders() can remain pending for streaming responses. The
       // regular header map is synchronous and includes Content-Type, which is
       // the only response header collection needs.
@@ -928,6 +957,75 @@ class JSCollector {
     }
   }
 
+  addInlineArtifact(artifact) {
+    if (!artifact?.content) return;
+    if (Buffer.byteLength(artifact.content) > this.options.maxInlineArtifactSize) {
+      this.inlineArtifactsSkipped += 1;
+      return;
+    }
+    const hash = crypto.createHash('sha256').update(`${artifact.kind}\0${artifact.content}`).digest('hex');
+    if (this.inlineArtifactHashes.has(hash)) return;
+    this.inlineArtifactHashes.add(hash);
+    this.inlineArtifacts.push({ ...artifact, sha256: hash, size: Buffer.byteLength(artifact.content) });
+  }
+
+  async extractInlineArtifacts(page = this.page) {
+    this.log('Collecting inline scripts and server-rendered configuration...');
+    for (const frame of page.frames()) {
+      try {
+        const extracted = await frame.evaluate(() => {
+          const scripts = Array.from(document.querySelectorAll('script:not([src])')).map((script, index) => ({
+            kind: script.type === 'application/json' || script.type === 'application/ld+json'
+              ? 'inline_json'
+              : 'inline_script',
+            index,
+            content: script.textContent || '',
+            script_type: script.type || 'text/javascript',
+          }));
+          const configuration = {
+            meta: Array.from(document.querySelectorAll('meta[name], meta[property]'))
+              .map(element => ({
+                name: element.getAttribute('name') || element.getAttribute('property'),
+                content: element.getAttribute('content'),
+              }))
+              .filter(item => item.content && /(?:api|endpoint|config|environment|graphql|socket|auth|csrf|token|nonce)/i.test(`${item.name} ${item.content}`)),
+            data_attributes: Array.from(document.querySelectorAll('*')).flatMap(element => (
+              Array.from(element.attributes || [])
+                .filter(attribute => attribute.name.startsWith('data-')
+                  && /(?:api|endpoint|config|environment|graphql|socket|auth|csrf|token|nonce)/i.test(`${attribute.name} ${attribute.value}`))
+                .map(attribute => ({ element: element.tagName.toLowerCase(), name: attribute.name, value: attribute.value }))
+            )),
+          };
+          return { baseUrl: document.baseURI, scripts, configuration };
+        });
+        for (const script of extracted.scripts) {
+          this.addInlineArtifact({
+            kind: script.kind,
+            pageUrl: page.url(),
+            frameUrl: frame.url(),
+            baseUrl: extracted.baseUrl,
+            index: script.index,
+            contentType: script.script_type,
+            content: script.content,
+          });
+        }
+        if (extracted.configuration.meta.length || extracted.configuration.data_attributes.length) {
+          this.addInlineArtifact({
+            kind: 'server_rendered_config',
+            pageUrl: page.url(),
+            frameUrl: frame.url(),
+            baseUrl: extracted.baseUrl,
+            index: 0,
+            contentType: 'application/json',
+            content: JSON.stringify(extracted.configuration, null, 2),
+          });
+        }
+      } catch (error) {
+        this.log(`Could not collect inline artifacts from frame ${frame.url()}: ${error.message}`);
+      }
+    }
+  }
+
   async extractServiceWorkers(targetUrl, page = this.page) {
     this.log('Checking for Service Worker registrations...');
 
@@ -1015,16 +1113,23 @@ class JSCollector {
   }
 
   async crawlSameOriginLinks() {
-    if (!this.options.crawlLinks) return;
+    if (!this.options.crawlLinks && this.options.entrypoints.length === 0) return;
 
     const seedUrl = this.page.url() || this.targetUrl;
     const allowedOrigin = new URL(seedUrl).origin;
     const visited = new Set([this.normalizeUrl(seedUrl, seedUrl)]);
-    const commonEntrypoints = ['/admin']
-      .map(route => this.normalizeUrl(route, allowedOrigin))
-      .filter(url => url && !visited.has(url));
-    const queue = [...commonEntrypoints, ...await this.extractCrawlLinks(this.page, allowedOrigin)]
+    const explicitEntrypoints = this.options.entrypoints.map(route => this.normalizeUrl(route, allowedOrigin));
+    for (const entrypoint of explicitEntrypoints) {
+      if (!entrypoint || new URL(entrypoint).origin !== allowedOrigin || !this.isSafeCrawlUrl(entrypoint, allowedOrigin)) {
+        throw new Error(`Entrypoint must be a safe same-origin URL: ${entrypoint || '(invalid)'}`);
+      }
+    }
+    const commonEntrypoints = this.options.crawlLinks ? ['/admin'].map(route => this.normalizeUrl(route, allowedOrigin)) : [];
+    const discoveredLinks = this.options.crawlLinks ? await this.extractCrawlLinks(this.page, allowedOrigin) : [];
+    const queue = [...explicitEntrypoints, ...commonEntrypoints, ...discoveredLinks]
       .filter(url => !visited.has(url));
+
+    this.pageCoverage.planned.push(...queue.filter(url => !this.pageCoverage.planned.includes(url)));
 
     this.log(`Crawling up to ${this.options.maxPages} same-origin links from ${allowedOrigin}...`);
     while (queue.length > 0 && visited.size - 1 < this.options.maxPages) {
@@ -1035,20 +1140,31 @@ class JSCollector {
       const page = await this.context.newPage();
       try {
         await this.initializePage(page);
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.options.timeout });
+        const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: this.options.timeout });
+        this.pageCoverage.visited.push({
+          requested_url: url,
+          final_url: page.url(),
+          outcome: 'visited',
+          status_code: response?.status() || null,
+        });
         await page.waitForTimeout(Math.min(this.options.waitTime, 1000));
         await this.extractDomScripts(page);
         if (this.options.scrolling) await this.scrollPage(page);
         await this.triggerInteractions(page);
         await this.extractInlineModules(page.url() || url, page);
+        await this.extractInlineArtifacts(page);
         await this.extractServiceWorkers(page.url() || url, page);
 
         for (const link of await this.extractCrawlLinks(page, allowedOrigin)) {
-          if (!visited.has(link) && !queue.includes(link)) queue.push(link);
+          if (!visited.has(link) && !queue.includes(link)) {
+            queue.push(link);
+            if (!this.pageCoverage.planned.includes(link)) this.pageCoverage.planned.push(link);
+          }
         }
       } catch (error) {
         const warning = `Link crawl failed for ${url}: ${error.message}`;
         this.metadata.warnings.push(warning);
+        this.pageCoverage.failed.push({ url, error: error.message });
         this.log(warning);
       } finally {
         await page.close();
@@ -1061,15 +1177,22 @@ class JSCollector {
   async collect(targetUrl) {
     this.log(`Starting collection for: ${targetUrl}`);
     this.metadata.initialUrl = targetUrl;
+    this.pageCoverage.planned.push(targetUrl);
 
     await this.init(this.options.browser || null, targetUrl);
     await this.setupInterceptors(targetUrl);
 
     this.log('Navigating to target...');
     try {
-      await this.page.goto(targetUrl, {
+      const response = await this.page.goto(targetUrl, {
         waitUntil: 'domcontentloaded',
         timeout: this.options.timeout,
+      });
+      this.pageCoverage.visited.push({
+        requested_url: targetUrl,
+        final_url: this.page.url(),
+        outcome: 'visited',
+        status_code: response?.status() || null,
       });
     } catch (error) {
       const currentUrl = this.page.url();
@@ -1079,6 +1202,7 @@ class JSCollector {
       const warning = `Navigation did not fully complete (${error.message}); continuing from ${currentUrl}`;
       this.metadata.warnings.push(warning);
       this.log(warning);
+      this.pageCoverage.failed.push({ url: targetUrl, error: error.message });
     }
 
     await this.runCollectionStep('Initial load wait', () => this.page.waitForTimeout(2000));
@@ -1094,8 +1218,13 @@ class JSCollector {
 
     const finalBaseUrl = this.page.url() || targetUrl;
     await this.runCollectionStep('Inline module extraction', () => this.extractInlineModules(finalBaseUrl));
+    await this.runCollectionStep('Inline artifact collection', () => this.extractInlineArtifacts());
     await this.runCollectionStep('Service Worker extraction', () => this.extractServiceWorkers(finalBaseUrl));
-    await this.runCollectionStep('Same-origin link crawl', () => this.crawlSameOriginLinks());
+    if (this.options.entrypoints.length > 0) {
+      await this.crawlSameOriginLinks();
+    } else {
+      await this.runCollectionStep('Same-origin link crawl', () => this.crawlSameOriginLinks());
+    }
 
     this.log('Final wait for async operations...');
     await this.runCollectionStep('Final wait', () => this.page.waitForTimeout(this.options.waitTime));
@@ -1128,7 +1257,42 @@ class JSCollector {
       failedRequests: [...this.metadata.failedRequests],
       warnings: [...this.metadata.warnings],
       sourceMaps: [...this.sourceMapUrls].sort(),
+      coverage: {
+        pages: {
+          planned: this.pageCoverage.planned.length,
+          visited: this.pageCoverage.visited.length,
+          failed: this.pageCoverage.failed.length,
+          entrypoints: [...this.options.entrypoints],
+          visits: [...this.pageCoverage.visited],
+          failures: [...this.pageCoverage.failed],
+        },
+        assets: {
+          javascript_observed: this.jsUrls.size,
+          source_maps: this.sourceMapUrls.size,
+          inline_artifacts: this.inlineArtifacts.length,
+          inline_artifacts_skipped: this.inlineArtifactsSkipped,
+          downloaded: null,
+          download_failed: null,
+          ai_artifacts_analyzed: null,
+          ai_artifacts_skipped: null,
+        },
+        api: this.apiInventory ? this.apiInventory.toJSON().summary : {
+          observations: 0,
+          browser_observations: 0,
+          imported_observations: 0,
+          unique_endpoints: 0,
+          websocket_connections: 0,
+        },
+      },
     };
+  }
+
+  getAPIInventory() {
+    return this.apiInventory;
+  }
+
+  getInlineArtifacts() {
+    return this.inlineArtifacts.map(item => ({ ...item }));
   }
 
   async close() {
@@ -1171,6 +1335,11 @@ class JSCollector {
     this.initializedPages = new WeakSet();
     this.pageInitializationTasks = new WeakMap();
     this.importMap = { imports: {} };
+    this.apiInventory = null;
+    this.inlineArtifacts = [];
+    this.inlineArtifactHashes = new Set();
+    this.inlineArtifactsSkipped = 0;
+    this.pageCoverage = { planned: [], visited: [], failed: [] };
     this.targetUrl = null;
     this.authDomains = [];
     this.authOrigins = [];

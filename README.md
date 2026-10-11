@@ -37,6 +37,9 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Secret Scanning Pipeline** - Discover, download, and scan JavaScript with TruffleHog in one command
 - **Unredacted Evidence Reports** - Preserves complete findings in mode-`0600` JSON reports for validation
 - **Managed TruffleHog** - Installs and explicitly updates checksum-validated official releases
+- **Optional AI Security Analysis** - Sends an isolated copy of downloaded JavaScript to an authenticated Codex or Claude CLI for evidence-backed analysis
+- **Hunt-Ready Reports** - Produces strict JSON plus readable Markdown covering endpoints, parameters, GraphQL, realtime channels, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
+- **Custom Analysis Prompts** - Uses the shipped security prompt by default, with per-run or config-file prompt and model overrides
 
 ## Installation
 
@@ -45,6 +48,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Node.js 18+** - Required for Playwright compatibility
 - **npm** - Comes with Node.js
 - **tar** - Used only for managed TruffleHog installation (normally preinstalled on Linux/macOS and modern Windows)
+- **Codex CLI or Claude Code CLI** - Optional; required only for `--ai`. Install and authenticate the provider separately before use.
 
 Check your Node.js version:
 ```bash
@@ -68,6 +72,9 @@ getjs scanner install
 # Verify both components
 getjs --version
 getjs scanner status --check-updates
+
+# Optional: verify an installed AI provider and inspect active settings
+getjs ai status --provider codex
 ```
 
 TruffleHog is not downloaded silently during a normal getjs installation or collection. This keeps installation predictable for offline and restricted systems. To install it as part of the first scanning pipeline instead, omit `getjs scanner install` and use `--install-scanner` with `--scan-secrets`.
@@ -201,6 +208,14 @@ getjs -u https://example.com --fetch-all -d ./js-files
 # Discover, download, and scan all JS in one pipeline
 getjs -u https://example.com --scan-secrets -d ./js-files
 
+# Download and analyze all discovered JS with the configured AI provider
+getjs -u https://example.com --ai -d ./js-files
+
+# Select Claude for this run and save reports at an explicit path
+getjs -u https://example.com --ai claude \
+  --ai-report ./evidence/example-ai.json \
+  -d ./js-files
+
 # Install TruffleHog automatically as part of the first pipeline run
 getjs -u https://example.com --scan-secrets --install-scanner -d ./js-files
 
@@ -322,6 +337,57 @@ Reports intentionally contain full, unredacted credential material and are creat
 
 Verification is disabled by default because it can make outbound requests containing a candidate credential. Use `--verify-secrets` only when the engagement scope permits active validation.
 
+#### AI Analysis Options
+
+`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. The built-in prompt requests evidence-backed reconnaissance and client-side security analysis, while the bundled JSON Schema keeps output stable for downstream tools.
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-a, --ai [provider]` | Analyze with `codex` or `claude` | Provider from config; `codex` initially |
+| `--ai-model <model>` | Override the configured provider model | Provider default |
+| `--prompt <file>` | Replace the built-in analysis instructions for this run | Built-in prompt |
+| `--ai-config <file>` | Read AI settings from another JSON file | Platform config path |
+| `--ai-report <file>` | JSON report path for one target; Markdown is written beside it | `<download-dir>/getjs-ai-analysis.json` |
+| `--ai-report-dir <dir>` | Per-target JSON and Markdown report directory | `<download-dir>/getjs-ai-analysis/` in multi-target mode |
+| `--ai-timeout <seconds>` | Provider process timeout | 900 |
+| `--ai-concurrency <n>` | Concurrent provider runs for multiple targets | 1 |
+| `--ai-max-files <n>` | Maximum files sent per target | 250 |
+| `--ai-max-total-size <mb>` | Maximum total input size per target | 100 MB |
+
+Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
+
+Both reports are created with mode `0600` because they can contain complete secrets and sensitive source excerpts. The provider may process the downloaded code remotely under its own product settings. Use `--ai` only when that is permitted by scope and policy.
+
+#### AI Configuration Command
+
+```text
+getjs ai init [-o <config.json>] [--force]
+getjs ai status [--provider codex|claude] [--ai-config <file>]
+```
+
+`getjs ai init` creates a private configuration file at `~/.config/getjs/config.json` on a typical Linux installation. The built-in defaults work without creating a file when the selected executable is already on `PATH`.
+
+```json
+{
+  "ai": {
+    "provider": "codex",
+    "prompt": "builtin",
+    "timeoutSeconds": 900,
+    "maxFiles": 250,
+    "maxTotalBytes": 104857600,
+    "concurrency": 1
+  },
+  "providers": {
+    "codex": { "executable": "codex", "model": null },
+    "claude": { "executable": "claude", "model": null }
+  }
+}
+```
+
+Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt shipped with getjs. Command-line values override config values. `getjs ai status` resolves the executable and displays its version, model, prompt, schema, and active config before you run a target.
+
+The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries.
+
 #### Scanner Management Command
 
 ```text
@@ -426,10 +492,25 @@ Output format:
       "warnings": []
     },
     "downloads": { "completed": 0, "failed": [] },
+    "aiAnalysis": {
+      "provider": "codex",
+      "model": null,
+      "reportPath": "/work/js-downloads/getjs-ai-analysis.json",
+      "markdownPath": "/work/js-downloads/getjs-ai-analysis.md",
+      "filesProvided": 12,
+      "filesAnalyzed": 12,
+      "endpoints": 31,
+      "secrets": 2,
+      "findings": 4,
+      "huntPlanItems": 8,
+      "complete": true
+    },
     "error": null
   }
 }
 ```
+
+`aiAnalysis` is present only with `--ai`. In multi-target mode, a failed provider run is recorded as `aiError` for that target while other targets continue.
 
 ### Resume / Incremental Mode
 
@@ -557,6 +638,47 @@ getjs -f targets.txt \
 
 The report records the getjs version, TruffleHog path/version, verification setting, scanned files and hashes, summary counts, and complete TruffleHog finding objects. Public client identifiers and false positives can still be reported; findings require analyst review.
 
+### AI-Assisted JavaScript Analysis
+
+Authenticate the provider CLI first, then verify that getjs can find it:
+
+```bash
+getjs ai status --provider codex
+getjs ai status --provider claude
+```
+
+Run the built-in security analysis:
+
+```bash
+# Uses the configured provider and implies --fetch-all
+getjs -u https://target.com --ai -d ./target-js
+
+# Explicit provider and model
+getjs -u https://target.com --ai codex --ai-model <model> -d ./target-js
+
+# Claude with an explicit private report location
+getjs -u https://target.com --ai claude \
+  --ai-report ./evidence/target-analysis.json \
+  -d ./target-js
+
+# Multi-target analysis, with provider calls deliberately bounded
+getjs -f targets.txt --ai codex \
+  --ai-concurrency 2 \
+  --ai-report-dir ./evidence/ai \
+  -d ./target-js
+```
+
+Use a custom prompt for a narrower job such as authorization-route mapping or framework-specific analysis:
+
+```bash
+getjs -u https://target.com --ai \
+  --prompt ./prompts/my-analysis.md \
+  --ai-report ./evidence/custom-analysis.json \
+  -d ./target-js
+```
+
+The custom prompt should describe what to extract and how to prioritize it; getjs supplies the target metadata, file manifest, mandatory safety instructions, and output schema. The JSON report is the canonical machine-readable artifact. The adjacent Markdown report is a concise analyst view generated deterministically from that JSON.
+
 ### Debugging
 
 ```bash
@@ -593,7 +715,13 @@ getjs -f targets.txt -s | nuclei -t exposures/
 ## Programmatic Usage
 
 ```javascript
-const { JSCollector, JSDownloader, scanDownloadedFiles } = require('getjs');
+const {
+  JSCollector,
+  JSDownloader,
+  analyzeDownloadedFiles,
+  resolveAISettings,
+  scanDownloadedFiles,
+} = require('getjs');
 
 async function main() {
   // Initialize collector
@@ -627,6 +755,14 @@ async function main() {
     });
     console.log(`Secret candidates: ${secretScan.total}`);
 
+    const aiAnalysis = await analyzeDownloadedFiles(results, {
+      settings: resolveAISettings({ ai: 'codex' }),
+      target: 'https://example.com',
+      workspace: './js-files',
+      reportPath: './js-files/getjs-ai-analysis.json',
+    });
+    console.log(`AI findings: ${aiAnalysis.findings}`);
+
   } finally {
     await collector.close();
   }
@@ -639,7 +775,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.2                          │
+│                         getjs v2.3                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │
@@ -672,6 +808,13 @@ main().catch(console.error);
 │  ├── Official release checksum validation                     │
 │  ├── Offline-by-default scanning                              │
 │  └── Mode-0600 unredacted evidence reports                    │
+├─────────────────────────────────────────────────────────────┤
+│  AI Analyzer (src/ai-analyzer.js)                            │
+│  ├── Codex and Claude CLI adapters                           │
+│  ├── Per-target isolated, read-only analysis workspace       │
+│  ├── Strict JSON Schema and evidence-reference validation    │
+│  ├── Built-in or user-supplied analysis prompt               │
+│  └── Mode-0600 canonical JSON and derived Markdown reports   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -693,15 +836,16 @@ main().catch(console.error);
 10. **Normalization** - Converts URLs to absolute form and deduplicates
 11. **Filtering and Downloads** - Applies domain filters before authenticated downloads
 12. **Optional Secret Scan** - Runs TruffleHog against files downloaded by the current invocation
-13. **Output** - Returns URLs plus redirect, failure, warning, download, and scan metadata in JSON mode
+13. **Optional AI Analysis** - Copies only the selected target's downloads into a temporary workspace, invokes Codex or Claude with bounded permissions, validates the result, and creates JSON and Markdown reports
+14. **Output** - Returns URLs plus redirect, failure, warning, download, scan, and AI report metadata in JSON mode
 
 ## Exit Status
 
 | Code | Meaning |
 |------|---------|
-| `0` | Collection completed without target or download errors |
+| `0` | Collection and requested analysis completed without errors |
 | `1` | The command could not run, such as invalid options, missing input, or browser startup failure |
-| `2` | Collection produced usable results but one or more targets, inputs, or downloads failed |
+| `2` | The multi-target run produced usable results but one or more targets, inputs, downloads, or AI analyses failed |
 | `3` | `--fail-on-secret` was enabled and the scan produced one or more findings |
 
 ## Limitations
@@ -714,6 +858,10 @@ main().catch(console.error);
 - **Static Candidates** - Recursive parsing intentionally reports plausible references even when they later return `404`; use `--no-recursive` for runtime-only results
 - **Secret Scanner Coverage** - TruffleHog scans downloaded files only; undiscovered chunks and runtime-only configuration remain outside the report
 - **Candidate Quality** - Unverified findings, public identifiers, and false positives require manual review
+- **AI Is Advisory** - Static model output can miss behavior or overstate a lead; validate every finding against the cited source and an authorized target
+- **Provider Data Handling** - `--ai` can send downloaded source, embedded tokens, and source excerpts to the configured provider; review engagement and provider policies first
+- **Minified and Obfuscated Code** - Models have finite context and may produce incomplete coverage when bundles are extremely large, generated, or intentionally obscured
+- **No Active AI Validation** - The AI stage does not execute target code or make target requests; its suggested checks are a manual hunt plan
 
 ## Future Improvements
 
@@ -726,6 +874,7 @@ main().catch(console.error);
 - [x] ~~Interactive authenticated-state capture~~ ✅ Implemented
 - [x] ~~Optional TruffleHog secret scanning pipeline~~ ✅ Implemented
 - [x] ~~Managed scanner installation and updates~~ ✅ Implemented
+- [x] ~~Optional Codex/Claude analysis with structured hunt reports~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Source map discovery and parsing
 - [ ] Integration with waybackurls for historical JS discovery

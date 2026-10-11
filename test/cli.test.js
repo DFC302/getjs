@@ -25,6 +25,9 @@ test('default help is the collect help and includes version', () => {
   assert.equal(defaultHelp.stdout, collectHelp.stdout);
   assert.match(defaultHelp.stdout, /-V, --version/);
   assert.match(defaultHelp.stdout, /-u, --url <url>/);
+  assert.match(defaultHelp.stdout, /--ai \[provider\]/);
+  assert.match(defaultHelp.stdout, /--prompt <file>/);
+  assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
 });
 
 test('version is available at both command levels', () => {

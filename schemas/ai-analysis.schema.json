@@ -1,0 +1,704 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://getjs.dev/schemas/ai-analysis.schema.json",
+  "title": "getjs AI JavaScript Security Analysis",
+  "description": "Canonical, evidence-backed output produced by the optional getjs AI analysis stage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run",
+    "target",
+    "executive_summary",
+    "coverage",
+    "evidence",
+    "inventory",
+    "findings",
+    "hunt_plan",
+    "global_limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "run": { "$ref": "#/$defs/run" },
+    "target": {
+      "type": "string",
+      "description": "Target URL or target identifier supplied by getjs."
+    },
+    "executive_summary": {
+      "type": "array",
+      "description": "Short, evidence-based summary statements ordered by hunting value.",
+      "items": { "type": "string" }
+    },
+    "coverage": { "$ref": "#/$defs/coverage" },
+    "evidence": {
+      "type": "array",
+      "description": "Deduplicated evidence ledger referenced by inventory and finding records.",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "inventory": { "$ref": "#/$defs/inventory" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/finding" }
+    },
+    "hunt_plan": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/huntPlanItem" }
+    },
+    "global_limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generated_at",
+        "getjs_version",
+        "provider",
+        "provider_version",
+        "model",
+        "prompt_source",
+        "prompt_sha256",
+        "schema_sha256",
+        "contains_unredacted_secrets"
+      ],
+      "properties": {
+        "generated_at": { "type": "string" },
+        "getjs_version": { "type": "string" },
+        "provider": {
+          "type": "string",
+          "enum": ["codex", "claude"]
+        },
+        "provider_version": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "prompt_source": { "type": "string" },
+        "prompt_sha256": { "type": "string" },
+        "schema_sha256": { "type": "string" },
+        "contains_unredacted_secrets": { "type": "boolean", "const": true }
+      }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["informational", "low", "medium", "high", "critical", "unknown"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "file",
+        "source_url",
+        "line",
+        "column",
+        "byte_offset",
+        "snippet",
+        "explanation"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable evidence ID such as EVID-001."
+        },
+        "file": { "type": "string" },
+        "source_url": { "type": ["string", "null"] },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "column": { "type": ["integer", "null"], "minimum": 1 },
+        "byte_offset": { "type": ["integer", "null"], "minimum": 0 },
+        "snippet": { "type": "string" },
+        "explanation": { "type": "string" }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "files_provided",
+        "files_analyzed",
+        "files_skipped",
+        "bytes_provided",
+        "bytes_analyzed",
+        "complete",
+        "notes"
+      ],
+      "properties": {
+        "files_provided": { "type": "integer", "minimum": 0 },
+        "files_analyzed": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "files_skipped": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "reason"],
+            "properties": {
+              "file": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
+        },
+        "bytes_provided": { "type": "integer", "minimum": 0 },
+        "bytes_analyzed": { "type": "integer", "minimum": 0 },
+        "complete": { "type": "boolean" },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "endpoints",
+        "graphql_operations",
+        "realtime_channels",
+        "routes_and_features",
+        "data_entities",
+        "secrets",
+        "technologies",
+        "third_party_integrations"
+      ],
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/endpoint" }
+        },
+        "graphql_operations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphqlOperation" }
+        },
+        "realtime_channels": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/realtimeChannel" }
+        },
+        "routes_and_features": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/routeFeature" }
+        },
+        "data_entities": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/dataEntity" }
+        },
+        "secrets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/secret" }
+        },
+        "technologies": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/technology" }
+        },
+        "third_party_integrations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/integration" }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "location",
+        "required",
+        "inferred_type",
+        "example_or_default",
+        "description",
+        "evidence_ids"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "location": {
+          "type": "string",
+          "enum": [
+            "path",
+            "query",
+            "header",
+            "cookie",
+            "json_body",
+            "form",
+            "multipart",
+            "graphql_variable",
+            "websocket_message",
+            "unknown"
+          ]
+        },
+        "required": { "type": ["boolean", "null"] },
+        "inferred_type": { "type": ["string", "null"] },
+        "example_or_default": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "url",
+        "url_kind",
+        "base_url",
+        "transport",
+        "methods",
+        "parameters",
+        "request_content_types",
+        "headers",
+        "authentication",
+        "credential_mode",
+        "request_body_shape",
+        "response_clues",
+        "confidence",
+        "evidence_ids",
+        "notes"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "url": { "type": "string" },
+        "url_kind": {
+          "type": "string",
+          "enum": ["absolute", "relative", "protocol_relative", "template", "dynamic", "unknown"]
+        },
+        "base_url": { "type": ["string", "null"] },
+        "transport": {
+          "type": "string",
+          "enum": ["http", "graphql", "json_rpc", "soap", "webhook", "telemetry", "other", "unknown"]
+        },
+        "methods": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "request_content_types": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "headers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "authentication": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "credential_mode": { "type": ["string", "null"] },
+        "request_body_shape": { "type": ["string", "null"] },
+        "response_clues": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "graphqlOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "endpoint_id",
+        "operation_type",
+        "operation_name",
+        "document_or_hash",
+        "variables",
+        "authentication",
+        "confidence",
+        "evidence_ids"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "endpoint_id": { "type": ["string", "null"] },
+        "operation_type": {
+          "type": "string",
+          "enum": ["query", "mutation", "subscription", "unknown"]
+        },
+        "operation_name": { "type": ["string", "null"] },
+        "document_or_hash": { "type": ["string", "null"] },
+        "variables": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "authentication": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "realtimeChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "transport",
+        "url",
+        "protocols",
+        "authentication",
+        "events",
+        "parameters",
+        "confidence",
+        "evidence_ids",
+        "notes"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "transport": {
+          "type": "string",
+          "enum": ["websocket", "socket_io", "sse", "broadcast_channel", "message_channel", "shared_worker", "other"]
+        },
+        "url": { "type": ["string", "null"] },
+        "protocols": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "authentication": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "events": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "routeFeature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "route_or_feature",
+        "kind",
+        "roles_or_entitlements",
+        "feature_flags",
+        "related_endpoint_ids",
+        "confidence",
+        "evidence_ids",
+        "notes"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "route_or_feature": { "type": "string" },
+        "kind": {
+          "type": "string",
+          "enum": ["route", "admin", "debug", "internal", "feature_flag", "workflow", "lazy_chunk", "source_map", "other"]
+        },
+        "roles_or_entitlements": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "feature_flags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "related_endpoint_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "dataEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "identifier_fields",
+        "sensitive_fields",
+        "operations",
+        "related_endpoint_ids",
+        "authorization_clues",
+        "confidence",
+        "evidence_ids"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "identifier_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "sensitive_fields": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "operations": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "related_endpoint_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "authorization_clues": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "secret": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "value",
+        "classification",
+        "context",
+        "confidence",
+        "evidence_ids",
+        "notes"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "value": { "type": "string" },
+        "classification": {
+          "type": "string",
+          "enum": ["public_identifier", "publishable_key", "placeholder", "test_fixture", "potential_secret", "likely_secret", "unknown"]
+        },
+        "context": { "type": "string" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "technology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category", "version", "confidence", "evidence_ids"] ,
+      "properties": {
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "version": { "type": ["string", "null"] },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category", "hosts", "identifiers", "confidence", "evidence_ids", "notes"],
+      "properties": {
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "hosts": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "identifiers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "category",
+        "title",
+        "severity",
+        "confidence",
+        "status",
+        "reachability",
+        "description",
+        "attacker_source",
+        "security_sink",
+        "guards_or_sanitizers",
+        "data_flow",
+        "related_inventory_ids",
+        "preconditions",
+        "impact_hypothesis",
+        "safe_validation_steps",
+        "evidence_ids",
+        "caveats"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "category": {
+          "type": "string",
+          "enum": [
+            "dom_xss",
+            "html_injection",
+            "postmessage",
+            "open_redirect",
+            "client_side_request_forgery",
+            "prototype_pollution",
+            "unsafe_dynamic_code",
+            "dom_clobbering",
+            "client_side_template_injection",
+            "reverse_tabnabbing",
+            "authentication",
+            "authorization",
+            "oauth_oidc",
+            "idor_bola_candidate",
+            "csrf",
+            "sensitive_data_exposure",
+            "hardcoded_secret",
+            "insecure_storage",
+            "websocket",
+            "graphql",
+            "service_worker",
+            "file_handling",
+            "business_logic",
+            "race_replay",
+            "cryptography",
+            "csp_trusted_types",
+            "webassembly_worker",
+            "supply_chain",
+            "dependency",
+            "privacy",
+            "other"
+          ]
+        },
+        "title": { "type": "string" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "status": {
+          "type": "string",
+          "enum": ["candidate", "pattern_only", "likely", "confirmed_in_code"]
+        },
+        "reachability": {
+          "type": "string",
+          "enum": ["complete_flow", "partial_flow", "sink_only", "source_only", "unknown"]
+        },
+        "description": { "type": "string" },
+        "attacker_source": { "type": ["string", "null"] },
+        "security_sink": { "type": ["string", "null"] },
+        "guards_or_sanitizers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "data_flow": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "related_inventory_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "preconditions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "impact_hypothesis": { "type": "string" },
+        "safe_validation_steps": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "caveats": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "huntPlanItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "priority",
+        "objective",
+        "rationale",
+        "related_ids",
+        "suggested_checks",
+        "scope_and_safety_notes"
+      ],
+      "properties": {
+        "priority": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"]
+        },
+        "objective": { "type": "string" },
+        "rationale": { "type": "string" },
+        "related_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "suggested_checks": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "scope_and_safety_notes": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

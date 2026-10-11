@@ -10,3 +10,10 @@ getjs-storage-state.json
 # Secret scan reports contain unredacted credential material
 getjs-secrets.json
 getjs-secrets-*.json
+
+# AI reports may contain unredacted credential material and sensitive code evidence
+getjs-ai-analysis.json
+getjs-ai-analysis.md
+getjs-ai-analysis/
+getjs-ai-analysis-*.json
+getjs-ai-analysis-*.md

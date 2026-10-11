@@ -1294,7 +1294,7 @@ class JSDownloader {
 
   async downloadAll(urls, contentDedup = false) {
     const results = new Array(urls.length);
-    const errors = [];
+    const errors = new Array(urls.length);
     const seenHashes = new Set();
 
     // Ensure output directory exists
@@ -1332,7 +1332,7 @@ class JSDownloader {
             sha256: contentHash,
           };
         } catch (error) {
-          errors.push({ url, error: error.message });
+          errors[index] = { url, error: error.message };
           this.log(`Failed to download ${url}: ${error.message}`);
         }
       }
@@ -1340,7 +1340,7 @@ class JSDownloader {
 
     const workerCount = Math.min(this.options.concurrency, Math.max(urls.length, 1));
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
-    return { results: results.filter(Boolean), errors };
+    return { results: results.filter(Boolean), errors: errors.filter(Boolean) };
   }
 }
 

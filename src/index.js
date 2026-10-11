@@ -23,11 +23,21 @@ const {
   scanDownloadedFiles,
   scannerStatus,
 } = require('./secret-scanner');
+const {
+  analyzeDownloadedFiles,
+  createDefaultAIConfig,
+  getAIStatus,
+  resolveAISettings,
+} = require('./ai-analyzer');
 
 module.exports = {
   JSCollector,
   JSDownloader,
+  analyzeDownloadedFiles,
+  createDefaultAIConfig,
+  getAIStatus,
   installManagedScanner,
+  resolveAISettings,
   scanDownloadedFiles,
   scannerStatus,
 };

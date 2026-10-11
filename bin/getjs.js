@@ -13,6 +13,13 @@ const {
   scanDownloadedFiles,
   scannerStatus,
 } = require('../src/secret-scanner');
+const {
+  analyzeDownloadedFiles,
+  createDefaultAIConfig,
+  getAIStatus,
+  getDefaultAIConfigPath,
+  resolveAISettings,
+} = require('../src/ai-analyzer');
 const { version: VERSION } = require('../package.json');
 
 function parseInteger(value, optionName, minimum) {
@@ -338,6 +345,75 @@ async function scanDownloads(downloads, options) {
   return result;
 }
 
+function aiReportPathForTarget(targetUrl, options, multipleTargets = false) {
+  if (options.aiReport) return path.resolve(options.aiReport);
+  if (options.aiReportDir || multipleTargets) {
+    const reportDirectory = path.resolve(
+      options.aiReportDir || path.join(options.downloadDir, 'getjs-ai-analysis'),
+    );
+    const filename = sanitizeDomainFilename(targetUrl).replace(/\.txt$/i, '.json');
+    return path.join(reportDirectory, filename);
+  }
+  return path.resolve(options.downloadDir, 'getjs-ai-analysis.json');
+}
+
+async function analyzeDownloads(targetUrl, downloads, options, multipleTargets = false) {
+  if (!downloads || downloads.length === 0) {
+    throw new Error(`AI analysis for ${targetUrl} requires at least one successful JavaScript download`);
+  }
+  const settings = options.aiSettings || resolveAISettings(options);
+  const reportPath = aiReportPathForTarget(targetUrl, options, multipleTargets);
+  log(
+    `[*] Analyzing ${downloads.length} downloaded JavaScript files with ${settings.provider}...`,
+    options.silent,
+  );
+  const result = await analyzeDownloadedFiles(downloads, {
+    settings,
+    target: targetUrl,
+    workspace: options.downloadDir,
+    downloadDir: options.downloadDir,
+    reportPath,
+  });
+  log(
+    `[*] AI analysis: ${result.endpoints} endpoints, ${result.secrets} secret candidates, `
+      + `${result.findings} security findings`,
+    options.silent,
+  );
+  log(`[!] Private AI JSON report saved to: ${result.reportPath} (mode 0600)`, options.silent);
+  log(`[!] Private AI Markdown report saved to: ${result.markdownPath} (mode 0600)`, options.silent);
+  return result;
+}
+
+async function analyzeMultipleDownloads(allResults, options) {
+  const settings = options.aiSettings || resolveAISettings(options);
+  const entries = [...allResults.entries()];
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= entries.length) return;
+      const [targetUrl, result] = entries[index];
+      try {
+        result.aiAnalysis = await analyzeDownloads(
+          targetUrl,
+          result.downloads.results,
+          { ...options, aiSettings: settings },
+          true,
+        );
+        result.aiError = null;
+      } catch (error) {
+        result.aiAnalysis = null;
+        result.aiError = error.message;
+        process.exitCode = Math.max(Number(process.exitCode) || 0, 2);
+        log(`[!] AI analysis failed for ${targetUrl}: ${error.message}`, options.silent);
+      }
+    }
+  };
+  const workerCount = Math.min(settings.concurrency, Math.max(entries.length, 1));
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
 // --- Single-URL collection ---
 
 async function collectJS(options) {
@@ -377,6 +453,9 @@ async function collectJS(options) {
     const secretScan = options.scanSecrets
       ? await scanDownloads(downloads.results, options)
       : null;
+    const aiAnalysis = options.ai
+      ? await analyzeDownloads(targetUrl, downloads.results, options)
+      : null;
 
     const metadata = collector.getMetadata();
     metadata.warnings.forEach(warning => log(`[!] ${warning}`, options.silent));
@@ -402,6 +481,7 @@ async function collectJS(options) {
             failed: downloads.errors,
           },
           ...(secretScan && { secretScan }),
+          ...(aiAnalysis && { aiAnalysis }),
           error: null,
         },
       };
@@ -410,7 +490,7 @@ async function collectJS(options) {
       filteredUrls.forEach(url => console.log(url));
     }
 
-    return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, error: null };
+    return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, aiAnalysis, error: null };
   } finally {
     await collector.close();
   }
@@ -512,6 +592,10 @@ async function collectMultipleJS(urls, options) {
       for (const result of allResults.values()) result.secretScan = secretScan;
     }
 
+    if (options.ai) {
+      await analyzeMultipleDownloads(allResults, options);
+    }
+
     await handleMultiOutput(allResults, options);
   } finally {
     await browser.close();
@@ -565,6 +649,8 @@ async function handleMultiOutput(allResults, options) {
           failed: result.downloads.errors,
         },
         ...(result.secretScan && { secretScan: result.secretScan }),
+        ...(result.aiAnalysis && { aiAnalysis: result.aiAnalysis }),
+        ...(result.aiError && { aiError: result.aiError }),
         error: result.error,
       };
     }
@@ -630,6 +716,16 @@ const collectCommand = program
   .option('--install-scanner', 'Install the managed TruffleHog release before scanning')
   .option('--update-scanner', 'Update managed TruffleHog to the latest release before scanning')
   .option('--scanner-version <version>', 'Managed TruffleHog version used with --install-scanner/--update-scanner')
+  .option('-a, --ai [provider]', 'Analyze downloaded JavaScript with codex or claude (uses configured provider when omitted)')
+  .option('--ai-model <model>', 'Override the configured AI model')
+  .option('--prompt <file>', 'Use a custom AI analysis prompt instead of the built-in prompt')
+  .option('--ai-config <file>', 'Path to getjs AI configuration JSON')
+  .option('--ai-report <file>', 'AI JSON report path for a single target')
+  .option('--ai-report-dir <dir>', 'Directory for per-target AI JSON and Markdown reports')
+  .option('--ai-timeout <seconds>', 'AI provider timeout in seconds', parsePositiveInteger('ai-timeout'))
+  .option('--ai-concurrency <n>', 'Concurrent AI analyses in multi-target mode', parsePositiveInteger('ai-concurrency'))
+  .option('--ai-max-files <n>', 'Maximum downloaded files supplied to AI per target', parsePositiveInteger('ai-max-files'))
+  .option('--ai-max-total-size <mb>', 'Maximum total downloaded size supplied to AI per target in MB', parsePositiveInteger('ai-max-total-size'))
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
   .addHelpText(
@@ -639,7 +735,10 @@ const collectCommand = program
       + '\nAuthentication capture:\n'
       + '  getjs auth -u <url> -o <storage-state.json>\n'
       + '\nScanner management:\n'
-      + '  getjs scanner <install|status|update>',
+      + '  getjs scanner <install|status|update>\n'
+      + '\nAI analysis:\n'
+      + '  getjs -u https://example.com --ai codex\n'
+      + '  getjs ai <init|status>',
   )
   .action(async (options) => {
     printBanner(options.silent);
@@ -668,9 +767,44 @@ const collectCommand = program
     if (options.trufflehogPath && (options.installScanner || options.updateScanner)) {
       throw new Error('--trufflehog-path cannot be combined with --install-scanner or --update-scanner');
     }
+    const aiOnlyOptions = [
+      options.aiModel,
+      options.prompt,
+      options.aiConfig,
+      options.aiReport,
+      options.aiReportDir,
+      options.aiTimeout,
+      options.aiConcurrency,
+      options.aiMaxFiles,
+      options.aiMaxTotalSize,
+    ];
+    if (!options.ai && aiOnlyOptions.some(value => value !== undefined)) {
+      throw new Error('AI analysis options require --ai');
+    }
+    if (options.aiReport && options.aiReportDir) {
+      throw new Error('Use either --ai-report or --ai-report-dir, not both');
+    }
     if (options.scanSecrets && !options.fetchAll && !options.fetchOne) {
       options.fetchAll = true;
       log('[*] --scan-secrets enabled --fetch-all for the collection pipeline', options.silent);
+    }
+    if (options.ai && !options.fetchAll && !options.fetchOne) {
+      options.fetchAll = true;
+      log('[*] --ai enabled --fetch-all for the collection pipeline', options.silent);
+    }
+    if (options.ai) {
+      options.aiSettings = resolveAISettings(options);
+      const status = getAIStatus(options);
+      if (!status.ready) {
+        throw new Error(
+          `${options.aiSettings.provider} executable was not found: ${status.configuredExecutable}. `
+            + `Install it or update ${status.configPath || status.defaultConfigPath}.`,
+        );
+      }
+      log(
+        `[!] AI analysis may send downloaded JavaScript, including embedded credentials, to ${options.aiSettings.provider}`,
+        options.silent,
+      );
     }
 
     // Determine URL sources
@@ -692,6 +826,9 @@ const collectCommand = program
 
     if (urls.length === 0) {
       throw new Error('Provide URLs via -u, -f, or stdin pipe');
+    }
+    if (urls.length > 1 && options.aiReport) {
+      throw new Error('--ai-report is only valid for a single target; use --ai-report-dir for multiple targets');
     }
 
     if (urls.length === 1) {
@@ -765,6 +902,46 @@ scannerCommand
     console.log(`Version: ${result.version}`);
   });
 
+const aiCommand = program
+  .command('ai')
+  .description('Initialize or inspect the optional AI analysis integration')
+  .version(VERSION);
+
+aiCommand
+  .command('init')
+  .description('Create a default getjs AI configuration file')
+  .option('-o, --output <file>', 'Configuration file path', getDefaultAIConfigPath())
+  .option('--force', 'Overwrite an existing configuration file')
+  .action(options => {
+    const outputPath = createDefaultAIConfig(options.output, options.force);
+    console.log(`Created AI configuration: ${outputPath}`);
+    console.log('Review the provider, executable, model, prompt, and analysis limits before use.');
+  });
+
+aiCommand
+  .command('status')
+  .description('Show the selected AI provider, executable, model, prompt, and config')
+  .option('--provider <provider>', 'Provider to inspect (codex or claude)')
+  .option('--ai-config <file>', 'Path to getjs AI configuration JSON')
+  .option('--ai-model <model>', 'Override the configured model for this check')
+  .option('--prompt <file>', 'Override the configured prompt for this check')
+  .action(options => {
+    const status = getAIStatus({
+      ai: options.provider,
+      aiConfig: options.aiConfig,
+      aiModel: options.aiModel,
+      prompt: options.prompt,
+    });
+    console.log(`Provider: ${status.provider}`);
+    console.log(`Executable: ${status.executable || `${status.configuredExecutable} (not found)`}`);
+    console.log(`Version: ${status.version || 'unknown'}`);
+    console.log(`Model: ${status.model || 'provider default'}`);
+    console.log(`Prompt: ${status.promptPath}`);
+    console.log(`Schema: ${status.schemaPath}`);
+    console.log(`Config: ${status.configPath || `${status.defaultConfigPath} (not created; built-in defaults active)`}`);
+    if (!status.ready) process.exitCode = 1;
+  });
+
 // Since collect is the default command, make top-level help describe the
 // options users can actually pass to `getjs` rather than only listing the
 // otherwise-redundant collect subcommand.
@@ -799,4 +976,7 @@ module.exports = {
   sanitizeDomainFilename,
   scanDownloads,
   writeUrlFile,
+  aiReportPathForTarget,
+  analyzeDownloads,
+  analyzeMultipleDownloads,
 };

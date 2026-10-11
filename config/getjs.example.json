@@ -1,0 +1,20 @@
+{
+  "ai": {
+    "provider": "codex",
+    "prompt": "builtin",
+    "timeoutSeconds": 900,
+    "maxFiles": 250,
+    "maxTotalBytes": 104857600,
+    "concurrency": 1
+  },
+  "providers": {
+    "codex": {
+      "executable": "codex",
+      "model": null
+    },
+    "claude": {
+      "executable": "claude",
+      "model": null
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "name": "getjs",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Extract JavaScript URLs from web applications by executing them like a real browser",
   "main": "src/index.js",
   "bin": {
@@ -13,6 +13,9 @@
   "files": [
     "bin/",
     "src/",
+    "prompts/",
+    "schemas/",
+    "config/",
     "README.md"
   ],
   "keywords": [

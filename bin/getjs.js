@@ -419,6 +419,8 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
   if (options.openapi) {
     result.openapi = generateOpenAPIFile(result.reportPath, options.openapi, {
       title: options.openapiTitle,
+      htmlPath: options.openapiHtml,
+      tryItOut: options.swaggerTryItOut,
     });
     log(
       `[*] OpenAPI: ${result.openapi.operations} operations across ${result.openapi.paths} paths, `
@@ -426,6 +428,13 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
       options.silent,
     );
     log(`[!] Private OpenAPI document saved to: ${result.openapi.outputPath} (mode 0600)`, options.silent);
+    if (result.openapi.swaggerUI) {
+      log(
+        `[!] Private Swagger UI saved to: ${result.openapi.swaggerUI.outputPath} (mode 0600, live requests `
+          + `${result.openapi.swaggerUI.tryItOut ? 'enabled' : 'disabled'})`,
+        options.silent,
+      );
+    }
   }
   return result;
 }
@@ -781,6 +790,8 @@ const collectCommand = program
   .option('--ai-include-third-party', 'Download and analyze third-party JavaScript instead of defaulting to target apex scope')
   .option('--openapi <file>', 'Generate OpenAPI 3.1 JSON from this run\'s AI report (single target)')
   .option('--openapi-title <title>', 'Override the generated OpenAPI document title')
+  .option('--openapi-html <file>', 'Generate a self-contained Swagger UI HTML page')
+  .option('--swagger-try-it-out', 'Enable live API requests in generated Swagger UI (explicit authorization required)')
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
   .addHelpText(
@@ -838,6 +849,8 @@ const collectCommand = program
       options.aiIncludeThirdParty,
       options.openapi,
       options.openapiTitle,
+      options.openapiHtml,
+      options.swaggerTryItOut,
     ];
     if (!options.ai && aiOnlyOptions.some(value => value !== undefined)) {
       throw new Error('AI analysis options require --ai');
@@ -847,6 +860,12 @@ const collectCommand = program
     }
     if (options.openapiTitle && !options.openapi) {
       throw new Error('--openapi-title requires --openapi');
+    }
+    if (options.openapiHtml && !options.openapi) {
+      throw new Error('--openapi-html requires --openapi');
+    }
+    if (options.swaggerTryItOut && !options.openapiHtml) {
+      throw new Error('--swagger-try-it-out requires --openapi-html');
     }
     if (options.scanSecrets && !options.fetchAll && !options.fetchOne) {
       options.fetchAll = true;
@@ -1017,10 +1036,25 @@ program
   .requiredOption('-i, --input <file>', 'Existing getjs AI analysis JSON report')
   .option('-o, --output <file>', 'Output path (default: replace .json with .openapi.json)')
   .option('--title <title>', 'Override the generated OpenAPI document title')
+  .option('--html <file>', 'Write a self-contained Swagger UI HTML page')
+  .option('--swagger-try-it-out', 'Enable live API requests in Swagger UI (disabled by default)')
   .action(options => {
-    const result = generateOpenAPIFile(options.input, options.output, { title: options.title });
+    if (options.swaggerTryItOut && !options.html) {
+      throw new Error('--swagger-try-it-out requires --html');
+    }
+    const result = generateOpenAPIFile(options.input, options.output, {
+      title: options.title,
+      htmlPath: options.html,
+      tryItOut: options.swaggerTryItOut,
+    });
     console.log(`Generated OpenAPI 3.1 document: ${result.outputPath}`);
     console.log(`${result.operations} operations across ${result.paths} paths; ${result.unresolved} unresolved endpoints preserved.`);
+    if (result.swaggerUI) {
+      console.log(
+        `Generated self-contained Swagger UI: ${result.swaggerUI.outputPath} `
+          + `(live requests ${result.swaggerUI.tryItOut ? 'enabled' : 'disabled'})`,
+      );
+    }
   });
 
 // Since collect is the default command, make top-level help describe the

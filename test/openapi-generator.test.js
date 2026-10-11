@@ -4,11 +4,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { pathToFileURL } = require('node:url');
+const { chromium } = require('playwright');
 
 const {
   defaultOpenAPIPath,
   generateOpenAPI,
   generateOpenAPIFile,
+  renderSwaggerHTML,
 } = require('../src/openapi-generator');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -147,6 +150,7 @@ test('OpenAPI generation maps inferred operations and preserves uncertainty', ()
   assert.equal(document.servers[0].url, 'https://www.example.com');
   const getUser = document.paths['/api/users/{userId}'].get;
   assert.equal(getUser.operationId, 'get_api_users_by_userId');
+  assert.deepEqual(getUser.tags, ['users']);
   assert.equal(getUser.parameters.find(item => item.name === 'userId').required, true);
   assert.equal(getUser.parameters.find(item => item.name === 'userId').schema.type, 'integer');
   assert.equal(getUser.parameters.find(item => item.name === 'expand').schema.example, 'roles');
@@ -217,13 +221,22 @@ test('file generation validates input, writes privately, and refuses to overwrit
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-openapi-'));
   try {
     const input = path.join(directory, 'analysis.json');
+    const htmlPath = path.join(directory, 'swagger.html');
     fs.writeFileSync(input, JSON.stringify(report()));
-    const result = generateOpenAPIFile(input);
+    const result = generateOpenAPIFile(input, null, { htmlPath });
     assert.equal(result.outputPath, defaultOpenAPIPath(input));
     assert.equal(result.operations, 3);
     assert.equal(fs.statSync(result.outputPath).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(htmlPath).mode & 0o777, 0o600);
+    assert.equal(result.swaggerUI.outputPath, htmlPath);
+    assert.equal(result.swaggerUI.tryItOut, false);
+    assert.ok(result.swaggerUI.bytes > 1_000_000);
     assert.equal(JSON.parse(fs.readFileSync(result.outputPath, 'utf8')).openapi, '3.1.0');
     assert.throws(() => generateOpenAPIFile(input, input), /must not overwrite/);
+    assert.throws(
+      () => generateOpenAPIFile(input, result.outputPath, { htmlPath: result.outputPath }),
+      /must not overwrite/,
+    );
 
     fs.writeFileSync(path.join(directory, 'invalid.json'), '{}');
     assert.throws(
@@ -235,20 +248,94 @@ test('file generation validates input, writes privately, and refuses to overwrit
   }
 });
 
+test('self-contained Swagger HTML escapes report data and is read-only by default', () => {
+  const document = generateOpenAPI(report());
+  document.info.title = '</title><script>globalThis.compromised=true</script>';
+  document.info.description = '</script><script>globalThis.compromised=true</script>';
+  const html = renderSwaggerHTML(document, {
+    assets: {
+      css: 'body{color:black}/* </style> */',
+      bundle: 'globalThis.SwaggerUIBundle = function () {}; // </script>',
+    },
+  });
+
+  assert.doesNotMatch(html, /<script>globalThis\.compromised/);
+  assert.match(html, /\\u003c\/script\\u003e/);
+  assert.match(html, /&lt;\/title&gt;/);
+  assert.match(html, /validatorUrl: null/);
+  assert.match(html, /queryConfigEnabled: false/);
+  assert.match(html, /supportedSubmitMethods: \[\]/);
+  assert.match(html, /connect-src 'none'/);
+  assert.doesNotMatch(html, /https:\/\/unpkg\.com|validator\.swagger\.io/);
+
+  const liveHtml = renderSwaggerHTML(document, {
+    tryItOut: true,
+    assets: { css: '', bundle: '' },
+  });
+  assert.match(liveHtml, /supportedSubmitMethods: \["get","put","post"/);
+  assert.match(liveHtml, /connect-src https: http:/);
+});
+
+test('generated Swagger UI renders offline in Chromium with live requests disabled', { timeout: 30000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-swagger-browser-'));
+  let browser;
+  try {
+    const input = path.join(directory, 'analysis.json');
+    const htmlPath = path.join(directory, 'swagger.html');
+    fs.writeFileSync(input, JSON.stringify(report()));
+    generateOpenAPIFile(input, null, { htmlPath });
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const errors = [];
+    const requests = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => {
+      if (message.type() === 'error') errors.push(message.text());
+    });
+    page.on('request', request => requests.push(request.url()));
+    await page.goto(pathToFileURL(htmlPath).href, { waitUntil: 'load' });
+    await page.waitForSelector('.swagger-ui .opblock');
+
+    const rendered = await page.evaluate(() => ({
+      operations: document.querySelectorAll('.swagger-ui .opblock').length,
+      validatorUrl: window.ui.getConfigs().validatorUrl,
+      submitMethods: window.ui.getConfigs().supportedSubmitMethods,
+      queryConfigEnabled: window.ui.getConfigs().queryConfigEnabled,
+    }));
+    assert.deepEqual(rendered, {
+      operations: 3,
+      validatorUrl: null,
+      submitMethods: [],
+      queryConfigEnabled: false,
+    });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(requests, [pathToFileURL(htmlPath).href]);
+  } finally {
+    if (browser) await browser.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('offline CLI generation succeeds without an AI executable on PATH', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-openapi-cli-'));
   try {
     const input = path.join(directory, 'analysis.json');
     const output = path.join(directory, 'openapi.json');
+    const html = path.join(directory, 'swagger.html');
     fs.writeFileSync(input, JSON.stringify(report()));
-    const result = spawnSync(process.execPath, [cli, 'openapi', '--input', input, '--output', output], {
+    const result = spawnSync(process.execPath, [
+      cli, 'openapi', '--input', input, '--output', output, '--html', html,
+    ], {
       cwd: projectRoot,
       encoding: 'utf8',
       env: { ...process.env, PATH: '' },
     });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /3 operations across 3 paths/);
+    assert.match(result.stdout, /live requests disabled/);
     assert.ok(fs.existsSync(output));
+    assert.ok(fs.existsSync(html));
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

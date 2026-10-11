@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 const psl = require('psl');
 
@@ -271,6 +272,18 @@ function operationId(method, openapiPath, used) {
   return candidate;
 }
 
+function tagForPath(openapiPath) {
+  const segments = openapiPath.split('/').filter(Boolean);
+  const staticSegment = segment => !segment.includes('{') && !segment.includes('}');
+  if (segments[0]?.toLowerCase() === 'api') {
+    if (segments[1]?.toLowerCase() === 'admin' && segments[2] && staticSegment(segments[2])) {
+      return `admin / ${segments[2]}`;
+    }
+    if (segments[1] && staticSegment(segments[1])) return segments[1];
+  }
+  return segments.find(staticSegment) || 'dynamic endpoints';
+}
+
 function buildOperation(endpoint, method, location, usedOperationIds) {
   const targetPathNames = [...location.path.matchAll(/\{([^{}]+)\}/g)].map(match => cleanTemplateName(match[1]));
   const sourcePathNames = [...(location.sourcePath || location.path).matchAll(/\{([^{}]+)\}/g)]
@@ -321,6 +334,7 @@ function buildOperation(endpoint, method, location, usedOperationIds) {
   const operation = {
     operationId: operationId(method, location.path, usedOperationIds),
     summary: `${method.toUpperCase()} ${location.path} (inferred)`,
+    tags: [tagForPath(location.path)],
     parameters: dedupeParameters(parameters),
     responses: { default: { description: responseDescription } },
     'x-getjs-endpoint-id': endpoint.id,
@@ -395,6 +409,7 @@ function generateOpenAPI(report, options = {}) {
   const paths = {};
   const canonicalPaths = new Map();
   const unresolved = [];
+  const tags = new Set();
   const usedOperationIds = new Set();
   let operations = 0;
 
@@ -426,6 +441,7 @@ function generateOpenAPI(report, options = {}) {
     if (!paths[location.path]) paths[location.path] = {};
     for (const method of validMethods) {
       const operation = buildOperation(endpoint, method, location, usedOperationIds);
+      operation.tags.forEach(tag => tags.add(tag));
       if (paths[location.path][method]) mergeOperation(paths[location.path][method], operation, endpoint);
       else {
         paths[location.path][method] = operation;
@@ -443,6 +459,7 @@ function generateOpenAPI(report, options = {}) {
       description: 'Inferred from client-side JavaScript by getjs. Treat this as reconnaissance data, not server-authoritative API documentation.',
     },
     servers: [{ url: target.origin }],
+    tags: [...tags].sort().map(name => ({ name })),
     paths: Object.fromEntries(Object.entries(paths).sort(([left], [right]) => left.localeCompare(right))),
     'x-getjs': {
       generator_version: GETJS_VERSION,
@@ -469,6 +486,156 @@ function defaultOpenAPIPath(inputPath) {
     : `${resolved}.openapi.json`;
 }
 
+function defaultSwaggerHTMLPath(openapiPath) {
+  const resolved = path.resolve(openapiPath);
+  return resolved.toLowerCase().endsWith('.json')
+    ? `${resolved.slice(0, -5)}.html`
+    : `${resolved}.html`;
+}
+
+function writePrivateText(filePath, content) {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
+  );
+  let descriptor;
+  try {
+    descriptor = fs.openSync(temporary, 'wx', 0o600);
+    fs.writeFileSync(descriptor, content);
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    try {
+      fs.renameSync(temporary, filePath);
+    } catch (error) {
+      if (process.platform !== 'win32' || !['EEXIST', 'EPERM'].includes(error.code)) throw error;
+      fs.rmSync(filePath, { force: true });
+      fs.renameSync(temporary, filePath);
+    }
+    fs.chmodSync(filePath, 0o600);
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeJsonForHtml(value) {
+  return JSON.stringify(value)
+    .replace(/&/g, '\\u0026')
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function escapeInlineAsset(value, closingTag) {
+  return value.replace(new RegExp(`</${closingTag}`, 'gi'), `<\\/${closingTag}`);
+}
+
+function readSwaggerAssets() {
+  let bundlePath;
+  let cssPath;
+  try {
+    bundlePath = require.resolve('swagger-ui-dist/swagger-ui-bundle.js');
+    cssPath = require.resolve('swagger-ui-dist/swagger-ui.css');
+  } catch (error) {
+    throw new Error(`Unable to load the bundled Swagger UI assets: ${error.message}`);
+  }
+  return {
+    bundle: fs.readFileSync(bundlePath, 'utf8'),
+    css: fs.readFileSync(cssPath, 'utf8'),
+  };
+}
+
+function renderSwaggerHTML(document, options = {}) {
+  if (!document || document.openapi !== '3.1.0' || !document.paths) {
+    throw new Error('Swagger UI generation requires a generated OpenAPI 3.1 document');
+  }
+  const allowTryItOut = options.tryItOut === true;
+  const assets = options.assets || readSwaggerAssets();
+  const title = document.info?.title || 'getjs inferred API';
+  const modeText = allowTryItOut
+    ? 'Live requests are enabled. Confirm authorization and scope before sending any request.'
+    : 'Read-only mode. Live requests are disabled; regenerate with --swagger-try-it-out to enable them.';
+  const modeClass = allowTryItOut ? 'live' : 'readonly';
+  const connectSource = allowTryItOut ? 'https: http:' : "'none'";
+  const methods = allowTryItOut
+    ? '["get","put","post","delete","options","head","patch","trace"]'
+    : '[]';
+  const spec = escapeJsonForHtml(document);
+  const css = escapeInlineAsset(assets.css, 'style');
+  const bundle = escapeInlineAsset(assets.bundle, 'script');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src ${connectSource}; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>${escapeHtml(title)} — Swagger UI</title>
+  <style>${css}
+    html { box-sizing: border-box; overflow-y: scroll; }
+    body { margin: 0; background: #fafafa; }
+    .getjs-notice { position: sticky; top: 0; z-index: 1000; padding: 10px 18px; border-bottom: 1px solid #c7d2fe; background: #eef2ff; color: #1e1b4b; font: 600 13px/1.45 system-ui, sans-serif; }
+    .getjs-notice.live { border-color: #f59e0b; background: #fffbeb; color: #78350f; }
+    .getjs-notice code { font-weight: 700; }
+  </style>
+</head>
+<body>
+  <div class="getjs-notice ${modeClass}"><strong>getjs inferred API:</strong> ${escapeHtml(modeText)}</div>
+  <div id="swagger-ui"></div>
+  <script type="application/json" id="getjs-openapi">${spec}</script>
+  <script>${bundle}</script>
+  <script>
+    (() => {
+      'use strict';
+      const spec = JSON.parse(document.getElementById('getjs-openapi').textContent);
+      window.ui = SwaggerUIBundle({
+        spec,
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        filter: true,
+        displayOperationId: true,
+        displayRequestDuration: true,
+        docExpansion: 'list',
+        persistAuthorization: false,
+        showExtensions: true,
+        showCommonExtensions: true,
+        tryItOutEnabled: false,
+        supportedSubmitMethods: ${methods},
+        validatorUrl: null,
+        queryConfigEnabled: false,
+        presets: [SwaggerUIBundle.presets.apis]
+      });
+    })();
+  </script>
+</body>
+</html>
+`;
+}
+
+function generateSwaggerUIFile(document, outputPath, options = {}) {
+  const resolvedOutput = path.resolve(outputPath);
+  const html = renderSwaggerHTML(document, options);
+  writePrivateText(resolvedOutput, html);
+  return {
+    outputPath: resolvedOutput,
+    tryItOut: options.tryItOut === true,
+    bytes: Buffer.byteLength(html),
+  };
+}
+
 function generateOpenAPIFile(inputPath, outputPath = null, options = {}) {
   const resolvedInput = path.resolve(inputPath);
   let report;
@@ -482,21 +649,41 @@ function generateOpenAPIFile(inputPath, outputPath = null, options = {}) {
   const document = generateOpenAPI(report, options);
   const resolvedOutput = path.resolve(outputPath || defaultOpenAPIPath(resolvedInput));
   if (resolvedOutput === resolvedInput) throw new Error('OpenAPI output must not overwrite the source AI analysis report');
+  const resolvedHtml = options.htmlPath ? path.resolve(options.htmlPath) : null;
+  if (resolvedHtml && [resolvedInput, resolvedOutput].includes(resolvedHtml)) {
+    throw new Error('Swagger UI output must not overwrite the source report or OpenAPI document');
+  }
+  const swaggerHtml = resolvedHtml
+    ? renderSwaggerHTML(document, { tryItOut: options.tryItOut })
+    : null;
   writePrivateJson(resolvedOutput, document);
+  let swaggerUI = null;
+  if (resolvedHtml && swaggerHtml) {
+    writePrivateText(resolvedHtml, swaggerHtml);
+    swaggerUI = {
+      outputPath: resolvedHtml,
+      tryItOut: options.tryItOut === true,
+      bytes: Buffer.byteLength(swaggerHtml),
+    };
+  }
   return {
     inputPath: resolvedInput,
     outputPath: resolvedOutput,
     paths: Object.keys(document.paths).length,
     operations: document['x-getjs'].generated_operations,
     unresolved: document['x-getjs'].unresolved_endpoints,
+    ...(swaggerUI && { swaggerUI }),
   };
 }
 
 module.exports = {
   defaultOpenAPIPath,
+  defaultSwaggerHTMLPath,
   endpointLocation,
   generateOpenAPI,
   generateOpenAPIFile,
+  generateSwaggerUIFile,
   normalizeTemplates,
+  renderSwaggerHTML,
   schemaForType,
 };

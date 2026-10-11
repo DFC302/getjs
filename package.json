@@ -1,6 +1,6 @@
 {
   "name": "getjs",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "description": "Extract JavaScript URLs from web applications by executing them like a real browser",
   "main": "src/index.js",
   "bin": {
@@ -31,7 +31,8 @@
   "dependencies": {
     "commander": "^12.1.0",
     "playwright": "^1.42.0",
-    "psl": "1.15.0"
+    "psl": "1.15.0",
+    "swagger-ui-dist": "5.17.13"
   },
   "engines": {
     "node": ">=18.0.0"

@@ -31,6 +31,8 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /--ai-max-inline-size <kb>/);
   assert.match(defaultHelp.stdout, /--ai-include-third-party/);
   assert.match(defaultHelp.stdout, /--openapi <file>/);
+  assert.match(defaultHelp.stdout, /--openapi-html <file>/);
+  assert.match(defaultHelp.stdout, /--swagger-try-it-out/);
   assert.match(defaultHelp.stdout, /--no-source-maps/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
   assert.match(defaultHelp.stdout, /getjs openapi --input/);
@@ -43,6 +45,8 @@ test('OpenAPI subcommand documents offline report conversion', () => {
   assert.match(help.stdout, /--input <file>/);
   assert.match(help.stdout, /--output <file>/);
   assert.match(help.stdout, /--title <title>/);
+  assert.match(help.stdout, /--html <file>/);
+  assert.match(help.stdout, /--swagger-try-it-out/);
 });
 
 test('version is available at both command levels', () => {

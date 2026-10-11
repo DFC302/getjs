@@ -29,7 +29,12 @@ const {
   getAIStatus,
   resolveAISettings,
 } = require('./ai-analyzer');
-const { generateOpenAPI, generateOpenAPIFile } = require('./openapi-generator');
+const {
+  generateOpenAPI,
+  generateOpenAPIFile,
+  generateSwaggerUIFile,
+  renderSwaggerHTML,
+} = require('./openapi-generator');
 
 module.exports = {
   JSCollector,
@@ -39,8 +44,10 @@ module.exports = {
   getAIStatus,
   generateOpenAPI,
   generateOpenAPIFile,
+  generateSwaggerUIFile,
   installManagedScanner,
   resolveAISettings,
+  renderSwaggerHTML,
   scanDownloadedFiles,
   scannerStatus,
 };

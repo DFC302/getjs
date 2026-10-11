@@ -53,3 +53,11 @@ test('npm package allowlist includes AI prompts, schemas, and configuration exam
   assert.ok(packageJson.files.includes('schemas/'));
   assert.ok(packageJson.files.includes('config/'));
 });
+
+test('Swagger UI runtime is pinned without an install-time analytics dependency', () => {
+  const packageJson = require('../package.json');
+  const packageLock = require('../package-lock.json');
+  assert.equal(packageJson.dependencies['swagger-ui-dist'], '5.17.13');
+  assert.equal(packageLock.packages['node_modules/swagger-ui-dist'].version, '5.17.13');
+  assert.equal(packageLock.packages['node_modules/@scarf/scarf'], undefined);
+});

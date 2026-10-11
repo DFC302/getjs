@@ -41,6 +41,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Hunt-Ready Reports** - Produces strict JSON plus readable Markdown covering endpoints, parameters, GraphQL, realtime channels, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
 - **Custom Analysis Prompts** - Uses the shipped security prompt by default, with per-run or config-file prompt and model overrides
 - **Offline OpenAPI Export** - Converts an existing AI report into evidence-linked OpenAPI 3.1 JSON without another model call
+- **Self-Contained Swagger UI** - Builds a portable, interactive HTML API explorer with embedded assets and no CDN or online validator
 
 ## Installation
 
@@ -221,10 +222,13 @@ getjs -u https://example.com --ai claude \
 getjs -u https://example.com --ai \
   --ai-report ./evidence/example-ai.json \
   --openapi ./evidence/example.openapi.json \
+  --openapi-html ./evidence/example-swagger.html \
   -d ./js-files
 
 # Or regenerate it later, entirely offline
-getjs openapi --input ./evidence/example-ai.json
+getjs openapi \
+  --input ./evidence/example-ai.json \
+  --html ./evidence/example-swagger.html
 
 # Install TruffleHog automatically as part of the first pipeline run
 getjs -u https://example.com --scan-secrets --install-scanner -d ./js-files
@@ -368,6 +372,8 @@ Verification is disabled by default because it can make outbound requests contai
 | `--ai-include-third-party` | Download and analyze scripts outside the target apex scope | Disabled |
 | `--openapi <file>` | Generate OpenAPI 3.1 JSON from this run's report without another model call; single-target mode only | Disabled |
 | `--openapi-title <title>` | Override the generated OpenAPI title | Target hostname |
+| `--openapi-html <file>` | Generate a self-contained Swagger UI page from this run's OpenAPI document | Disabled |
+| `--swagger-try-it-out` | Permit live requests from generated Swagger UI; requires `--openapi-html` | Disabled |
 
 Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
 
@@ -409,14 +415,18 @@ The mandatory execution wrapper remains in effect with a custom prompt: download
 #### OpenAPI Generation Command
 
 ```text
-getjs openapi --input <getjs-ai-analysis.json> [--output <openapi.json>] [--title <title>]
+getjs openapi --input <getjs-ai-analysis.json> [--output <openapi.json>] [--html <swagger.html>] [--title <title>] [--swagger-try-it-out]
 ```
 
 This command is deterministic and offline: it reads the canonical AI JSON report and does not start Codex, Claude, Chromium, or a network request. When `--output` is omitted, it writes `<input-name>.openapi.json` beside the report. The same conversion can run immediately after analysis with `--openapi <file>`; that convenience flag reuses the completed report and does not incur a second AI call.
 
 Resolvable in-scope URLs with standard HTTP methods become OpenAPI 3.1 paths and operations. The converter maps path, query, header, cookie, JSON-body, form, and multipart parameters, while retaining auth clues, confidence, endpoint IDs, evidence IDs, notes, inferred request shapes, and response clues in `x-getjs-*` extensions. Same-apex API subdomains use operation-level `servers`. Dynamic URLs, unsupported or missing methods, and off-scope endpoints are preserved under `x-getjs-unresolved-endpoints` rather than guessed or discarded.
 
-The document is an inferred hunting aid, not an authoritative server contract. It is written with mode `0600` because extensions may contain sensitive source-derived details.
+Add `--html <file>` to create a Petstore-style Swagger UI alongside the JSON. The generated page embeds the OpenAPI document, Swagger UI JavaScript, and CSS in one portable HTML file. It makes no CDN request, disables Swagger's online validator, blocks query-string configuration overrides, and uses a restrictive Content Security Policy. Routes are grouped into inferred tags to make large applications easier to browse.
+
+The page is read-only by default. `--swagger-try-it-out` enables Swagger UI's live request controls and relaxes the page's network policy for HTTP(S) API requests. Use that option only with explicit authorization; browser CORS policy can still prevent requests. Credentials are not persisted by the page.
+
+The document and viewer are inferred hunting aids, not authoritative server contracts. Both are written with mode `0600` because they may contain sensitive source-derived details.
 
 #### Scanner Management Command
 
@@ -539,7 +549,12 @@ Output format:
         "outputPath": "/work/evidence/target.openapi.json",
         "paths": 24,
         "operations": 31,
-        "unresolved": 5
+        "unresolved": 5,
+        "swaggerUI": {
+          "outputPath": "/work/evidence/target-swagger.html",
+          "tryItOut": false,
+          "bytes": 1900000
+        }
       }
     },
     "error": null
@@ -721,7 +736,14 @@ Create or recreate an OpenAPI document later without using an AI provider:
 ```bash
 getjs openapi \
   --input ./evidence/target-analysis.json \
-  --output ./evidence/target.openapi.json
+  --output ./evidence/target.openapi.json \
+  --html ./evidence/target-swagger.html
+
+# Explicitly enable live request controls for an authorized engagement
+getjs openapi \
+  --input ./evidence/target-analysis.json \
+  --html ./evidence/target-swagger-live.html \
+  --swagger-try-it-out
 ```
 
 ### Debugging
@@ -812,6 +834,7 @@ async function main() {
     const openapi = generateOpenAPIFile(
       aiAnalysis.reportPath,
       './js-files/getjs.openapi.json',
+      { htmlPath: './js-files/getjs-swagger.html' },
     );
     console.log(`OpenAPI operations: ${openapi.operations}`);
 
@@ -827,7 +850,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.5                          │
+│                         getjs v2.6                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │
@@ -836,6 +859,7 @@ main().catch(console.error);
 │  ├── Domain filtering (whitelist/blacklist)                 │
 │  ├── Output routing (stdout, file, per-domain, JSON)        │
 │  ├── Offline OpenAPI generation from canonical AI JSON     │
+│  ├── Self-contained Swagger UI rendering                   │
 │  └── Resume/incremental mode                                │
 ├─────────────────────────────────────────────────────────────┤
 │  JSCollector (src/collector.js)                              │
@@ -930,6 +954,7 @@ main().catch(console.error);
 - [x] ~~Optional Codex/Claude analysis with structured hunt reports~~ ✅ Implemented
 - [x] ~~Automatic same-origin source map discovery~~ ✅ Implemented
 - [x] ~~Offline OpenAPI 3.1 generation from AI reports~~ ✅ Implemented
+- [x] ~~Self-contained Swagger UI HTML generation~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Integration with waybackurls for historical JS discovery
 

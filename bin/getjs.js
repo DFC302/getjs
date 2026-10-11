@@ -21,6 +21,7 @@ const {
   getDefaultAIConfigPath,
   resolveAISettings,
 } = require('../src/ai-analyzer');
+const { generateOpenAPIFile } = require('../src/openapi-generator');
 const { version: VERSION } = require('../package.json');
 
 function parseInteger(value, optionName, minimum) {
@@ -415,6 +416,17 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
   );
   log(`[!] Private AI JSON report saved to: ${result.reportPath} (mode 0600)`, options.silent);
   log(`[!] Private AI Markdown report saved to: ${result.markdownPath} (mode 0600)`, options.silent);
+  if (options.openapi) {
+    result.openapi = generateOpenAPIFile(result.reportPath, options.openapi, {
+      title: options.openapiTitle,
+    });
+    log(
+      `[*] OpenAPI: ${result.openapi.operations} operations across ${result.openapi.paths} paths, `
+        + `${result.openapi.unresolved} unresolved endpoints`,
+      options.silent,
+    );
+    log(`[!] Private OpenAPI document saved to: ${result.openapi.outputPath} (mode 0600)`, options.silent);
+  }
   return result;
 }
 
@@ -767,6 +779,8 @@ const collectCommand = program
   .option('--ai-max-total-size <mb>', 'Maximum total downloaded size supplied to AI per target in MB', parsePositiveInteger('ai-max-total-size'))
   .option('--ai-max-inline-size <kb>', 'Maximum JavaScript content embedded directly in the AI prompt in KB', parsePositiveInteger('ai-max-inline-size'))
   .option('--ai-include-third-party', 'Download and analyze third-party JavaScript instead of defaulting to target apex scope')
+  .option('--openapi <file>', 'Generate OpenAPI 3.1 JSON from this run\'s AI report (single target)')
+  .option('--openapi-title <title>', 'Override the generated OpenAPI document title')
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
   .addHelpText(
@@ -779,7 +793,9 @@ const collectCommand = program
       + '  getjs scanner <install|status|update>\n'
       + '\nAI analysis:\n'
       + '  getjs -u https://example.com --ai codex\n'
-      + '  getjs ai <init|status>',
+      + '  getjs ai <init|status>\n'
+      + '\nOffline OpenAPI generation:\n'
+      + '  getjs openapi --input getjs-ai-analysis.json',
   )
   .action(async (options) => {
     printBanner(options.silent);
@@ -820,12 +836,17 @@ const collectCommand = program
       options.aiMaxTotalSize,
       options.aiMaxInlineSize,
       options.aiIncludeThirdParty,
+      options.openapi,
+      options.openapiTitle,
     ];
     if (!options.ai && aiOnlyOptions.some(value => value !== undefined)) {
       throw new Error('AI analysis options require --ai');
     }
     if (options.aiReport && options.aiReportDir) {
       throw new Error('Use either --ai-report or --ai-report-dir, not both');
+    }
+    if (options.openapiTitle && !options.openapi) {
+      throw new Error('--openapi-title requires --openapi');
     }
     if (options.scanSecrets && !options.fetchAll && !options.fetchOne) {
       options.fetchAll = true;
@@ -872,6 +893,9 @@ const collectCommand = program
     }
     if (urls.length > 1 && options.aiReport) {
       throw new Error('--ai-report is only valid for a single target; use --ai-report-dir for multiple targets');
+    }
+    if (urls.length > 1 && options.openapi) {
+      throw new Error('--openapi is only valid for a single target; use getjs openapi for existing per-target reports');
     }
 
     if (urls.length === 1) {
@@ -984,6 +1008,19 @@ aiCommand
     console.log(`Schema: ${status.schemaPath}`);
     console.log(`Config: ${status.configPath || `${status.defaultConfigPath} (not created; built-in defaults active)`}`);
     if (!status.ready) process.exitCode = 1;
+  });
+
+program
+  .command('openapi')
+  .description('Generate OpenAPI 3.1 JSON from an existing getjs AI analysis report without another AI run')
+  .version(VERSION)
+  .requiredOption('-i, --input <file>', 'Existing getjs AI analysis JSON report')
+  .option('-o, --output <file>', 'Output path (default: replace .json with .openapi.json)')
+  .option('--title <title>', 'Override the generated OpenAPI document title')
+  .action(options => {
+    const result = generateOpenAPIFile(options.input, options.output, { title: options.title });
+    console.log(`Generated OpenAPI 3.1 document: ${result.outputPath}`);
+    console.log(`${result.operations} operations across ${result.paths} paths; ${result.unresolved} unresolved endpoints preserved.`);
   });
 
 // Since collect is the default command, make top-level help describe the

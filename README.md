@@ -40,6 +40,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Optional AI Security Analysis** - Sends an isolated copy of downloaded JavaScript to an authenticated Codex or Claude CLI for evidence-backed analysis
 - **Hunt-Ready Reports** - Produces strict JSON plus readable Markdown covering endpoints, parameters, GraphQL, realtime channels, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
 - **Custom Analysis Prompts** - Uses the shipped security prompt by default, with per-run or config-file prompt and model overrides
+- **Offline OpenAPI Export** - Converts an existing AI report into evidence-linked OpenAPI 3.1 JSON without another model call
 
 ## Installation
 
@@ -216,6 +217,15 @@ getjs -u https://example.com --ai claude \
   --ai-report ./evidence/example-ai.json \
   -d ./js-files
 
+# Generate OpenAPI during the same AI run (no additional model call)
+getjs -u https://example.com --ai \
+  --ai-report ./evidence/example-ai.json \
+  --openapi ./evidence/example.openapi.json \
+  -d ./js-files
+
+# Or regenerate it later, entirely offline
+getjs openapi --input ./evidence/example-ai.json
+
 # Install TruffleHog automatically as part of the first pipeline run
 getjs -u https://example.com --scan-secrets --install-scanner -d ./js-files
 
@@ -356,6 +366,8 @@ Verification is disabled by default because it can make outbound requests contai
 | `--ai-max-total-size <mb>` | Maximum total input size per target | 100 MB |
 | `--ai-max-inline-size <kb>` | Maximum source bytes in each provider pass | 512 KB |
 | `--ai-include-third-party` | Download and analyze scripts outside the target apex scope | Disabled |
+| `--openapi <file>` | Generate OpenAPI 3.1 JSON from this run's report without another model call; single-target mode only | Disabled |
+| `--openapi-title <title>` | Override the generated OpenAPI title | Target hostname |
 
 Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
 
@@ -393,6 +405,18 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
 Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt shipped with getjs. Command-line values override config values. `getjs ai status` resolves the executable and displays its version, model, prompt, schema, and active config before you run a target.
 
 The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries. getjs embeds each source range directly in provider input so analysis does not depend on model-initiated filesystem commands. For Codex, getjs creates a private temporary writable `CODEX_HOME` under the user's cache directory, copies an existing file-based `auth.json` into it with mode `0600`, and removes the temporary home after the run. This lets Codex write required process and socket state while the staged JavaScript files remain read-only. Set `providers.codex.home` when the authenticated source profile is somewhere other than `CODEX_HOME` or `~/.codex`. Final reports are written by getjs to the requested report path.
+
+#### OpenAPI Generation Command
+
+```text
+getjs openapi --input <getjs-ai-analysis.json> [--output <openapi.json>] [--title <title>]
+```
+
+This command is deterministic and offline: it reads the canonical AI JSON report and does not start Codex, Claude, Chromium, or a network request. When `--output` is omitted, it writes `<input-name>.openapi.json` beside the report. The same conversion can run immediately after analysis with `--openapi <file>`; that convenience flag reuses the completed report and does not incur a second AI call.
+
+Resolvable in-scope URLs with standard HTTP methods become OpenAPI 3.1 paths and operations. The converter maps path, query, header, cookie, JSON-body, form, and multipart parameters, while retaining auth clues, confidence, endpoint IDs, evidence IDs, notes, inferred request shapes, and response clues in `x-getjs-*` extensions. Same-apex API subdomains use operation-level `servers`. Dynamic URLs, unsupported or missing methods, and off-scope endpoints are preserved under `x-getjs-unresolved-endpoints` rather than guessed or discarded.
+
+The document is an inferred hunting aid, not an authoritative server contract. It is written with mode `0600` because extensions may contain sensitive source-derived details.
 
 #### Scanner Management Command
 
@@ -509,7 +533,14 @@ Output format:
       "secrets": 2,
       "findings": 4,
       "huntPlanItems": 8,
-      "complete": true
+      "complete": true,
+      "providerCalls": 4,
+      "openapi": {
+        "outputPath": "/work/evidence/target.openapi.json",
+        "paths": 24,
+        "operations": 31,
+        "unresolved": 5
+      }
     },
     "error": null
   }
@@ -685,6 +716,14 @@ getjs -u https://target.com --ai \
 
 The custom prompt should describe what to extract and how to prioritize it; getjs supplies the target metadata, file manifest, mandatory safety instructions, and output schema. The JSON report is the canonical machine-readable artifact. The adjacent Markdown report is a concise analyst view generated deterministically from that JSON.
 
+Create or recreate an OpenAPI document later without using an AI provider:
+
+```bash
+getjs openapi \
+  --input ./evidence/target-analysis.json \
+  --output ./evidence/target.openapi.json
+```
+
 ### Debugging
 
 ```bash
@@ -725,6 +764,7 @@ const {
   JSCollector,
   JSDownloader,
   analyzeDownloadedFiles,
+  generateOpenAPIFile,
   resolveAISettings,
   scanDownloadedFiles,
 } = require('getjs');
@@ -769,6 +809,12 @@ async function main() {
     });
     console.log(`AI findings: ${aiAnalysis.findings}`);
 
+    const openapi = generateOpenAPIFile(
+      aiAnalysis.reportPath,
+      './js-files/getjs.openapi.json',
+    );
+    console.log(`OpenAPI operations: ${openapi.operations}`);
+
   } finally {
     await collector.close();
   }
@@ -781,7 +827,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.3                          │
+│                         getjs v2.5                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │
@@ -789,6 +835,7 @@ main().catch(console.error);
 │  ├── Multi-domain orchestrator (concurrent batches)         │
 │  ├── Domain filtering (whitelist/blacklist)                 │
 │  ├── Output routing (stdout, file, per-domain, JSON)        │
+│  ├── Offline OpenAPI generation from canonical AI JSON     │
 │  └── Resume/incremental mode                                │
 ├─────────────────────────────────────────────────────────────┤
 │  JSCollector (src/collector.js)                              │
@@ -881,8 +928,9 @@ main().catch(console.error);
 - [x] ~~Optional TruffleHog secret scanning pipeline~~ ✅ Implemented
 - [x] ~~Managed scanner installation and updates~~ ✅ Implemented
 - [x] ~~Optional Codex/Claude analysis with structured hunt reports~~ ✅ Implemented
+- [x] ~~Automatic same-origin source map discovery~~ ✅ Implemented
+- [x] ~~Offline OpenAPI 3.1 generation from AI reports~~ ✅ Implemented
 - [ ] HAR file export
-- [ ] Source map discovery and parsing
 - [ ] Integration with waybackurls for historical JS discovery
 
 ## License

@@ -465,6 +465,7 @@ test('--ai performs collect, download, structured analysis, and JSON reporting',
     const configPath = path.join(directory, 'config.json');
     const downloadDir = path.join(directory, 'downloads');
     const reportPath = path.join(directory, 'evidence', 'analysis.json');
+    const openapiPath = path.join(directory, 'evidence', 'openapi.json');
     fs.writeFileSync(configPath, JSON.stringify({
       ai: { provider: 'codex' },
       providers: { codex: { executable, model: null, home: directory } },
@@ -475,6 +476,7 @@ test('--ai performs collect, download, structured analysis, and JSON reporting',
       '--ai',
       '--ai-config', configPath,
       '--ai-report', reportPath,
+      '--openapi', openapiPath,
       '--download-dir', downloadDir,
       '--no-recursive',
       '--no-scroll',
@@ -489,6 +491,9 @@ test('--ai performs collect, download, structured analysis, and JSON reporting',
     assert.equal(output.aiAnalysis.reportPath, reportPath);
     assert.ok(fs.existsSync(reportPath));
     assert.ok(fs.existsSync(reportPath.replace(/\.json$/, '.md')));
+    assert.equal(output.aiAnalysis.openapi.outputPath, openapiPath);
+    assert.equal(output.aiAnalysis.openapi.operations, 1);
+    assert.equal(JSON.parse(fs.readFileSync(openapiPath, 'utf8')).openapi, '3.1.0');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
     await new Promise(resolve => server.close(resolve));

@@ -29,6 +29,7 @@ const {
   getAIStatus,
   resolveAISettings,
 } = require('./ai-analyzer');
+const { generateOpenAPI, generateOpenAPIFile } = require('./openapi-generator');
 
 module.exports = {
   JSCollector,
@@ -36,6 +37,8 @@ module.exports = {
   analyzeDownloadedFiles,
   createDefaultAIConfig,
   getAIStatus,
+  generateOpenAPI,
+  generateOpenAPIFile,
   installManagedScanner,
   resolveAISettings,
   scanDownloadedFiles,

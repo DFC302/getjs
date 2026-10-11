@@ -30,8 +30,19 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /--prompt <file>/);
   assert.match(defaultHelp.stdout, /--ai-max-inline-size <kb>/);
   assert.match(defaultHelp.stdout, /--ai-include-third-party/);
+  assert.match(defaultHelp.stdout, /--openapi <file>/);
   assert.match(defaultHelp.stdout, /--no-source-maps/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
+  assert.match(defaultHelp.stdout, /getjs openapi --input/);
+});
+
+test('OpenAPI subcommand documents offline report conversion', () => {
+  const help = runCli(['openapi', '--help']);
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /without\s+another AI run/);
+  assert.match(help.stdout, /--input <file>/);
+  assert.match(help.stdout, /--output <file>/);
+  assert.match(help.stdout, /--title <title>/);
 });
 
 test('version is available at both command levels', () => {

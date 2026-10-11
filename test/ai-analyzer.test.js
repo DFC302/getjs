@@ -12,6 +12,7 @@ const {
   analyzeDownloadedFiles,
   buildManifest,
   createDefaultAIConfig,
+  deduplicateMergedReport,
   prepareCodexEnvironment,
   resolveAISettings,
 } = require('../src/ai-analyzer');
@@ -282,7 +283,7 @@ test('Codex receives an isolated writable home with private copied authenticatio
   }
 });
 
-test('partial inline content cannot be reported as complete file coverage', async () => {
+test('chunked AI analysis reviews every byte before reporting complete coverage', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-ai-partial-'));
   try {
     const workspace = path.join(directory, 'downloads');
@@ -299,10 +300,11 @@ test('partial inline content cannot be reported as complete file coverage', asyn
       reportPath,
     });
     const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
-    assert.equal(result.complete, false);
-    assert.equal(result.filesAnalyzed, 0);
-    assert.equal(report.coverage.bytes_analyzed, 20);
-    assert.match(report.coverage.files_skipped[0].reason, /Partial inline analysis/);
+    assert.equal(result.complete, true);
+    assert.equal(result.filesAnalyzed, 1);
+    assert.equal(result.providerCalls, 5);
+    assert.equal(report.coverage.bytes_analyzed, 100);
+    assert.equal(report.coverage.files_skipped.length, 0);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -326,6 +328,35 @@ test('Codex inline content is reduced when JSON escaping would exceed its input 
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('chunk merge deduplicates inventory and rewrites references', () => {
+  const report = {
+    executive_summary: ['same', 'same'],
+    global_limitations: [],
+    evidence: [
+      { id: 'E1', file: 'app.js', byte_offset: 1, line: 1, column: 1, snippet: 'fetch', explanation: 'first' },
+      { id: 'E2', file: 'app.js', byte_offset: 1, line: 1, column: 1, snippet: 'fetch', explanation: 'second' },
+    ],
+    inventory: {
+      endpoints: [
+        { id: 'P1', url: '/api/users', methods: ['GET'], evidence_ids: ['E1'], notes: [] },
+        { id: 'P2', url: '/api/users', methods: ['POST'], evidence_ids: ['E2'], notes: ['second pass'] },
+      ],
+      graphql_operations: [], realtime_channels: [], routes_and_features: [], data_entities: [], secrets: [],
+      technologies: [], third_party_integrations: [],
+    },
+    findings: [{ id: 'F1', category: 'authorization', title: 'Check users', related_inventory_ids: ['P2'], evidence_ids: ['E2'] }],
+    hunt_plan: [{ objective: 'Review users', related_ids: ['P2', 'F1'] }],
+  };
+  deduplicateMergedReport(report);
+  assert.equal(report.evidence.length, 1);
+  assert.equal(report.inventory.endpoints.length, 1);
+  assert.deepEqual(report.inventory.endpoints[0].methods, ['GET', 'POST']);
+  assert.deepEqual(report.inventory.endpoints[0].evidence_ids, ['E1']);
+  assert.deepEqual(report.findings[0].related_inventory_ids, ['P1']);
+  assert.deepEqual(report.hunt_plan[0].related_ids, ['P1', 'F1']);
+  assert.deepEqual(report.executive_summary, ['same']);
 });
 
 test('manifest limits are deterministic and symlinks cannot escape the workspace', () => {

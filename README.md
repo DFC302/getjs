@@ -269,10 +269,11 @@ cat urls.txt | getjs [options]
 | `-w, --wait <seconds>` | Additional wait after load | 5 |
 | `--no-scroll` | Disable automatic scrolling | - |
 | `--no-recursive` | Disable recursive dependency parsing | - |
+| `--no-source-maps` | Disable valid same-origin source-map discovery | Source-map discovery enabled |
 | `--max-depth <n>` | Maximum recursive import depth | 3 |
 | `--max-files <n>` | Maximum recursively parsed scripts | 500 |
 | `--max-file-size <mb>` | Maximum parsed/downloaded script size | 10 |
-| `--crawl` | Visit safe same-origin GET links | - |
+| `--crawl` | Visit the same-origin `/admin` entry point and safe discovered GET links | - |
 | `--max-pages <n>` | Maximum additional pages for `--crawl` | 10 |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
@@ -339,7 +340,7 @@ Verification is disabled by default because it can make outbound requests contai
 
 #### AI Analysis Options
 
-`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. The built-in prompt requests evidence-backed reconnaissance and client-side security analysis, while the bundled JSON Schema keeps output stable for downstream tools.
+`--ai` runs after collection and download. It enables `--fetch-all` when no fetch option was supplied, then gives the selected provider only an isolated copy of the successfully downloaded files for that target. By default, AI mode infers the target's registrable domain and saves/analyzes only JavaScript from that apex and its subdomains; browser-observed Google, analytics, consent, video, and other third-party scripts are excluded. Use `--filter-domain` to supply the engagement scope explicitly or `--ai-include-third-party` to opt back into vendor analysis. The built-in prompt requests evidence-backed reconnaissance and client-side security analysis, while the bundled JSON Schema keeps output stable for downstream tools.
 
 | Option | Description | Default |
 |--------|-------------|---------|
@@ -349,13 +350,16 @@ Verification is disabled by default because it can make outbound requests contai
 | `--ai-config <file>` | Read AI settings from another JSON file | Platform config path |
 | `--ai-report <file>` | JSON report path for one target; Markdown is written beside it | `<download-dir>/getjs-ai-analysis.json` |
 | `--ai-report-dir <dir>` | Per-target JSON and Markdown report directory | `<download-dir>/getjs-ai-analysis/` in multi-target mode |
-| `--ai-timeout <seconds>` | Provider process timeout | 900 |
+| `--ai-timeout <seconds>` | Provider timeout for each full-review pass | 900 |
 | `--ai-concurrency <n>` | Concurrent provider runs for multiple targets | 1 |
 | `--ai-max-files <n>` | Maximum files sent per target | 250 |
 | `--ai-max-total-size <mb>` | Maximum total input size per target | 100 MB |
-| `--ai-max-inline-size <kb>` | Maximum source content embedded directly in the provider prompt | 512 KB |
+| `--ai-max-inline-size <kb>` | Maximum source bytes in each provider pass | 512 KB |
+| `--ai-include-third-party` | Download and analyze scripts outside the target apex scope | Disabled |
 
 Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
+
+Every byte of every selected file is supplied to the provider. Inputs larger than one safe provider request are divided into byte-range passes and merged into one report; getjs fails the AI stage if any pass fails. Valid same-origin source maps are downloaded by default, allowing embedded original sources to be reviewed alongside production bundles. Chunked review guarantees byte coverage, although a data flow crossing a chunk boundary can still require manual follow-up.
 
 Both reports are created with mode `0600` because they can contain complete secrets and sensitive source excerpts. The provider may process the downloaded code remotely under its own product settings. Use `--ai` only when that is permitted by scope and policy.
 
@@ -388,7 +392,7 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
 
 Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt shipped with getjs. Command-line values override config values. `getjs ai status` resolves the executable and displays its version, model, prompt, schema, and active config before you run a target.
 
-The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries. getjs embeds up to `maxInlineBytes` of source directly in the provider input so ordinary runs do not depend on model-initiated filesystem commands; larger inputs remain available in the isolated read-only workspace. For Codex, getjs creates a private temporary writable `CODEX_HOME` under the user's cache directory, copies an existing file-based `auth.json` into it with mode `0600`, and removes the temporary home after the run. This lets Codex write required process and socket state while the staged JavaScript files remain read-only. Set `providers.codex.home` when the authenticated source profile is somewhere other than `CODEX_HOME` or `~/.codex`. Final reports are written by getjs to the requested report path.
+The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries. getjs embeds each source range directly in provider input so analysis does not depend on model-initiated filesystem commands. For Codex, getjs creates a private temporary writable `CODEX_HOME` under the user's cache directory, copies an existing file-based `auth.json` into it with mode `0600`, and removes the temporary home after the run. This lets Codex write required process and socket state while the staged JavaScript files remain read-only. Set `providers.codex.home` when the authenticated source profile is somewhere other than `CODEX_HOME` or `~/.codex`. Final reports are written by getjs to the requested report path.
 
 #### Scanner Management Command
 
@@ -405,7 +409,7 @@ Managed binaries are stored under the user's data directory (`~/.local/share/get
 | Option | Description | Default |
 |--------|-------------|---------|
 | `--threads <n>` | Concurrent threads for multi-URL | 3 |
-| `--filter-domain <pattern...>` | Only include JS from matching domains | - |
+| `--filter-domain <pattern...>` | Only include JS from matching apex/domain scopes | AI mode infers target apex |
 | `--exclude-domain <pattern...>` | Exclude JS from matching domains | - |
 | `--resume` | Skip URLs already in output file | - |
 
@@ -456,8 +460,8 @@ https://api.target1.com
 ### Domain Filtering
 
 ```bash
-# Only collect first-party JS
-getjs -u https://target.com --filter-domain "*.target.com"
+# Only collect first-party JS; bare apex and wildcard both include subdomains
+getjs -u https://target.com --filter-domain target.com
 
 # Exclude known CDNs
 getjs -u https://target.com --exclude-domain "*.googleapis.com" --exclude-domain "*.cloudflare.com"

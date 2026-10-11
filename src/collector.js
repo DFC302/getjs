@@ -25,6 +25,20 @@ function matchDomainPattern(hostname, pattern) {
   return regex.test(normalizedHost);
 }
 
+function matchCollectionScope(hostname, pattern) {
+  const normalizedHost = String(hostname || '').toLowerCase();
+  const normalizedPattern = String(pattern || '').trim().toLowerCase();
+  if (!normalizedHost || !normalizedPattern) return false;
+  if (normalizedPattern.startsWith('*.')) {
+    const base = normalizedPattern.slice(2);
+    return normalizedHost === base || normalizedHost.endsWith(`.${base}`);
+  }
+  if (!normalizedPattern.includes('*')) {
+    return normalizedHost === normalizedPattern || normalizedHost.endsWith(`.${normalizedPattern}`);
+  }
+  return matchDomainPattern(normalizedHost, normalizedPattern);
+}
+
 function normalizeSameSite(value) {
   if (!value) return undefined;
 
@@ -64,11 +78,15 @@ class JSCollector {
       maxFileSize: options.maxFileSize ?? 10 * 1024 * 1024,
       crawlLinks: options.crawlLinks === true,
       maxPages: options.maxPages ?? 10,
+      sourceMaps: options.sourceMaps !== false,
+      scopeDomains: Array.isArray(options.scopeDomains) ? options.scopeDomains : [],
     };
 
     this.jsUrls = new Set();
     this.wsJsUrls = new Set();  // WebSocket-discovered JS
     this.swScripts = new Set(); // Service Worker scripts
+    this.sourceMapUrls = new Set(); // Valid source maps discovered from JavaScript bundles
+    this.sourceMapAttempts = new Set();
     this.browser = null;
     this.context = null;
     this.page = null;
@@ -403,6 +421,16 @@ class JSCollector {
     return this.isAuthDomain(url) ? { ...this.options.headers } : {};
   }
 
+  isCollectionScopeUrl(url) {
+    if (this.options.scopeDomains.length === 0) return true;
+    try {
+      const hostname = new URL(url).hostname;
+      return this.options.scopeDomains.some(pattern => matchCollectionScope(hostname, pattern));
+    } catch (error) {
+      return false;
+    }
+  }
+
   async setupScopedHeaders() {
     await this.context.route('**/*', async (route) => {
       const request = route.request();
@@ -545,7 +573,9 @@ class JSCollector {
         } catch (error) {
           // Service Worker requests are not associated with a frame.
         }
-        this.recordJsUrl(request.url(), baseUrl, 'request');
+        // Chromium's resource classification is authoritative for extensionless
+        // script endpoints (for example, module aggregators ending in /m=root).
+        this.recordJsUrl(request.url(), baseUrl, 'request', true);
       }
 
       if (request.isNavigationRequest() && request.frame() === this.page.mainFrame()) {
@@ -560,7 +590,9 @@ class JSCollector {
       // the only response header collection needs.
       const contentType = response.headers()['content-type'] || '';
       if (this.isJavaScriptUrl(response.url(), contentType)) {
-        this.recordJsUrl(response.url(), targetUrl, 'response');
+        // Keep responses identified by JavaScript Content-Type even when the
+        // URL has no conventional script extension.
+        this.recordJsUrl(response.url(), targetUrl, 'response', true);
       }
     });
 
@@ -577,7 +609,7 @@ class JSCollector {
         } catch (error) {
           // Service Worker requests are not associated with a frame.
         }
-        this.recordJsUrl(request.url(), baseUrl, 'failed request');
+        this.recordJsUrl(request.url(), baseUrl, 'failed request', true);
       }
     });
 
@@ -705,6 +737,67 @@ class JSCollector {
     return urls;
   }
 
+  sourceMapCandidates(source, scriptUrl, headers = {}) {
+    if (!this.options.sourceMaps) return [];
+    const candidates = new Set();
+    const addCandidate = (candidate) => {
+      if (typeof candidate !== 'string' || !candidate.trim() || /^data:/i.test(candidate.trim())) return;
+      const normalized = this.normalizeUrl(candidate.trim().replace(/["']$/g, ''), scriptUrl);
+      if (normalized && /^https?:/i.test(normalized)) candidates.add(normalized);
+    };
+
+    addCandidate(headers.sourcemap || headers['source-map'] || headers['x-sourcemap']);
+    const pattern = /(?:\/\/[#@]|\/\*[#@])\s*sourceMappingURL\s*=\s*([^\s*]+)\s*(?:\*\/)?/gi;
+    let match;
+    while ((match = pattern.exec(source)) !== null) addCandidate(match[1]);
+
+    // Some production bundles publish a sibling map but omit the mapping
+    // comment. Probe only target-origin scripts so this does not fan out across
+    // unrelated CDNs.
+    try {
+      const parsedScript = new URL(scriptUrl);
+      const targetOrigin = this.targetUrl ? new URL(this.targetUrl).origin : null;
+      if (targetOrigin && parsedScript.origin === targetOrigin && /\.(?:mjs|cjs|js)$/i.test(parsedScript.pathname)) {
+        parsedScript.pathname = `${parsedScript.pathname}.map`;
+        candidates.add(parsedScript.href);
+      }
+    } catch (error) {
+      // Invalid URLs are excluded by normal collection before this point.
+    }
+    return [...candidates];
+  }
+
+  async discoverSourceMaps(source, scriptUrl, headers = {}) {
+    for (const candidate of this.sourceMapCandidates(source, scriptUrl, headers)) {
+      if (!this.isCollectionScopeUrl(candidate)) continue;
+      if (this.sourceMapAttempts.has(candidate)) continue;
+      this.sourceMapAttempts.add(candidate);
+      let response;
+      try {
+        response = await this.requestWithScopedRedirects(candidate);
+        if (response.status() < 200 || response.status() >= 300) continue;
+        const responseHeaders = response.headers();
+        const contentType = responseHeaders['content-type'] || '';
+        if (/text\/html|application\/xhtml\+xml/i.test(contentType)) continue;
+        const declaredSize = Number(responseHeaders['content-length']);
+        if (Number.isFinite(declaredSize) && declaredSize > this.options.maxFileSize) continue;
+        const body = await response.body();
+        if (body.length > this.options.maxFileSize) continue;
+        const parsed = JSON.parse(body.toString('utf8'));
+        if (parsed?.version !== 3 || !Array.isArray(parsed.sources)) continue;
+        const normalized = this.recordJsUrl(response.url(), scriptUrl, 'source map', true);
+        if (normalized) {
+          this.sourceMapUrls.add(normalized);
+          this.log(`Validated source map with ${parsed.sources.length} sources: ${normalized}`);
+        }
+      } catch (error) {
+        this.log(`Source map probe did not produce a valid map (${candidate}): ${error.message}`);
+      } finally {
+        if (response) await response.dispose().catch(() => {});
+      }
+    }
+  }
+
   async requestWithScopedRedirects(url, maxRedirects = 10) {
     let currentUrl = url;
     for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
@@ -738,6 +831,7 @@ class JSCollector {
     while (queue.length > 0 && visited.size < this.options.maxFiles) {
       const { url, depth } = queue.shift();
       if (visited.has(url) || depth > this.options.maxDepth || !/^https?:/i.test(url)) continue;
+      if (!this.isCollectionScopeUrl(url)) continue;
       visited.add(url);
 
       let response;
@@ -771,6 +865,8 @@ class JSCollector {
           this.log(`Skipping HTML returned for JavaScript dependency: ${response.url()}`);
           continue;
         }
+
+        await this.discoverSourceMaps(body.toString('utf8'), response.url(), headers);
 
         if (depth >= this.options.maxDepth) continue;
         const references = this.extractJavaScriptReferences(body.toString('utf8'), response.url());
@@ -924,7 +1020,10 @@ class JSCollector {
     const seedUrl = this.page.url() || this.targetUrl;
     const allowedOrigin = new URL(seedUrl).origin;
     const visited = new Set([this.normalizeUrl(seedUrl, seedUrl)]);
-    const queue = [...await this.extractCrawlLinks(this.page, allowedOrigin)]
+    const commonEntrypoints = ['/admin']
+      .map(route => this.normalizeUrl(route, allowedOrigin))
+      .filter(url => url && !visited.has(url));
+    const queue = [...commonEntrypoints, ...await this.extractCrawlLinks(this.page, allowedOrigin)]
       .filter(url => !visited.has(url));
 
     this.log(`Crawling up to ${this.options.maxPages} same-origin links from ${allowedOrigin}...`);
@@ -1028,6 +1127,7 @@ class JSCollector {
       redirects: [...this.metadata.redirects],
       failedRequests: [...this.metadata.failedRequests],
       warnings: [...this.metadata.warnings],
+      sourceMaps: [...this.sourceMapUrls].sort(),
     };
   }
 
@@ -1065,6 +1165,8 @@ class JSCollector {
     this.jsUrls = new Set();
     this.wsJsUrls = new Set();
     this.swScripts = new Set();
+    this.sourceMapUrls = new Set();
+    this.sourceMapAttempts = new Set();
     this.pendingTasks = new Set();
     this.initializedPages = new WeakSet();
     this.pageInitializationTasks = new WeakMap();

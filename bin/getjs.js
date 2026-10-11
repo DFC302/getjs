@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline/promises');
 const { chromium } = require('playwright');
+const psl = require('psl');
 const { JSCollector, JSDownloader } = require('../src/collector');
 const {
   getRelease,
@@ -158,7 +159,12 @@ function matchDomainPattern(hostname, pattern) {
     const base = normalizedPattern.slice(2);
     return normalizedHost === base || normalizedHost.endsWith(`.${base}`);
   }
-  if (!normalizedPattern.includes('*')) return normalizedHost === normalizedPattern;
+  // A bare apex scope includes the apex and all of its subdomains. This is
+  // intentionally broader than credential scoping, which remains exact-origin
+  // unless --auth-domain is explicitly supplied.
+  if (!normalizedPattern.includes('*')) {
+    return normalizedHost === normalizedPattern || normalizedHost.endsWith(`.${normalizedPattern}`);
+  }
   const regex = new RegExp(`^${normalizedPattern
     .split('*')
     .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
@@ -239,8 +245,29 @@ async function captureAuthState(options) {
   }
 }
 
-function filterUrls(jsUrls, options) {
-  if (!options.filterDomain && !options.excludeDomain) {
+function inferredAIScope(targetUrl) {
+  try {
+    const hostname = new URL(targetUrl).hostname;
+    return psl.get(hostname) || hostname;
+  } catch (error) {
+    return null;
+  }
+}
+
+function effectiveFilterDomains(options, targetUrl) {
+  if (options.filterDomain) {
+    return Array.isArray(options.filterDomain) ? options.filterDomain : [options.filterDomain];
+  }
+  if (options.ai && !options.aiIncludeThirdParty) {
+    const inferred = inferredAIScope(targetUrl);
+    return inferred ? [inferred] : [];
+  }
+  return [];
+}
+
+function filterUrls(jsUrls, options, targetUrl = options.url) {
+  const filterDomains = effectiveFilterDomains(options, targetUrl);
+  if (filterDomains.length === 0 && !options.excludeDomain) {
     return jsUrls;
   }
 
@@ -253,11 +280,8 @@ function filterUrls(jsUrls, options) {
     }
 
     // Whitelist check
-    if (options.filterDomain) {
-      const patterns = Array.isArray(options.filterDomain)
-        ? options.filterDomain
-        : [options.filterDomain];
-      const matches = patterns.some(p => matchDomainPattern(hostname, p));
+    if (filterDomains.length > 0) {
+      const matches = filterDomains.some(p => matchDomainPattern(hostname, p));
       if (!matches) return false;
     }
 
@@ -296,6 +320,8 @@ function createCollectorOptions(targetUrl, options, browser = null) {
     maxFileSize: options.maxFileSize * 1024 * 1024,
     crawlLinks: options.crawl,
     maxPages: options.maxPages,
+    sourceMaps: options.sourceMaps,
+    scopeDomains: effectiveFilterDomains(options, targetUrl),
     browser,
   };
 }
@@ -312,11 +338,14 @@ function createDownloader(collector, options) {
   });
 }
 
-async function downloadForTarget(collector, urls, options) {
+async function downloadForTarget(collector, urls, options, targetUrl) {
   if (!options.fetchAll && !options.fetchOne) return { results: [], errors: [] };
   const downloader = createDownloader(collector, options);
 
   if (options.fetchOne) {
+    if (filterUrls([options.fetchOne], options, targetUrl).length === 0) {
+      throw new Error(`--fetch-one URL is outside the active download scope: ${options.fetchOne}`);
+    }
     const outputPath = path.join(options.downloadDir, downloader.sanitizeFilename(options.fetchOne));
     try {
       const result = await downloader.downloadOne(options.fetchOne, outputPath);
@@ -373,10 +402,15 @@ async function analyzeDownloads(targetUrl, downloads, options, multipleTargets =
     workspace: options.downloadDir,
     downloadDir: options.downloadDir,
     reportPath,
+    onProgress: progress => log(
+      `[*] AI pass ${progress.pass}/${progress.totalPasses}: ${progress.file} `
+      + `[${progress.startByte}-${progress.endByte})`,
+      options.silent,
+    ),
   });
   log(
-    `[*] AI analysis: ${result.endpoints} endpoints, ${result.secrets} secret candidates, `
-      + `${result.findings} security findings`,
+    `[*] AI analysis (${result.providerCalls} passes): ${result.endpoints} endpoints, `
+      + `${result.secrets} secret candidates, ${result.findings} security findings`,
     options.silent,
   );
   log(`[!] Private AI JSON report saved to: ${result.reportPath} (mode 0600)`, options.silent);
@@ -429,10 +463,14 @@ async function collectJS(options) {
     const jsUrls = await collector.collect(targetUrl);
 
     // Apply domain filters
-    const filteredUrls = filterUrls(jsUrls, options);
+    const filteredUrls = filterUrls(jsUrls, options, targetUrl);
 
-    if (options.filterDomain || options.excludeDomain) {
-      log(`[*] Found ${jsUrls.length} JavaScript files (${filteredUrls.length} after filtering)`, options.silent);
+    if (options.ai && !options.filterDomain && !options.aiIncludeThirdParty) {
+      log(`[*] AI download scope inferred as: ${effectiveFilterDomains(options, targetUrl)[0]}`, options.silent);
+    }
+
+    if (filteredUrls.length !== jsUrls.length || options.filterDomain || options.excludeDomain) {
+      log(`[*] Found ${jsUrls.length} JavaScript files (${filteredUrls.length} in download scope)`, options.silent);
     } else {
       log(`[*] Found ${jsUrls.length} JavaScript files`, options.silent);
     }
@@ -441,7 +479,7 @@ async function collectJS(options) {
       log('[!] Warning: --fetch-one URL was not in the discovered list; attempting it anyway', options.silent);
     }
 
-    const downloads = await downloadForTarget(collector, filteredUrls, options);
+    const downloads = await downloadForTarget(collector, filteredUrls, options, targetUrl);
     if (options.fetchAll || options.fetchOne) {
       log(`[*] Downloaded: ${downloads.results.length} files, Failed: ${downloads.errors.length}`, options.silent);
       if (downloads.errors.length > 0) {
@@ -545,15 +583,15 @@ async function collectMultipleJS(urls, options) {
         try {
           log(`[*] Collecting: ${targetUrl}`, options.silent);
           const jsUrls = await collector.collect(targetUrl);
-          const filteredUrls = filterUrls(jsUrls, options);
-          log(`[*] Found ${jsUrls.length} JS files for ${targetUrl} (${filteredUrls.length} after filtering)`, options.silent);
+          const filteredUrls = filterUrls(jsUrls, options, targetUrl);
+          log(`[*] Found ${jsUrls.length} JS files for ${targetUrl} (${filteredUrls.length} in download scope)`, options.silent);
 
           let downloads = { results: [], errors: [] };
           const shouldFetchOne = options.fetchOne && !fetchOneClaimed;
           if (shouldFetchOne) fetchOneClaimed = true;
           if (options.fetchAll || shouldFetchOne) {
             const downloadOptions = shouldFetchOne ? options : { ...options, fetchOne: undefined };
-            downloads = await downloadForTarget(collector, filteredUrls, downloadOptions);
+            downloads = await downloadForTarget(collector, filteredUrls, downloadOptions, targetUrl);
             log(`[*] Downloads for ${targetUrl}: ${downloads.results.length} completed, ${downloads.errors.length} failed`, options.silent);
           }
 
@@ -685,6 +723,7 @@ const collectCommand = program
   .option('-w, --wait <seconds>', 'Additional wait time after page load', parseNonNegativeInteger('wait'), 5)
   .option('--no-scroll', 'Disable automatic scrolling')
   .option('--no-recursive', 'Disable recursive parsing of discovered JavaScript bundles')
+  .option('--no-source-maps', 'Disable automatic same-origin source map discovery')
   .option('--max-depth <n>', 'Maximum recursive import depth', parseNonNegativeInteger('max-depth'), 3)
   .option('--max-files <n>', 'Maximum scripts parsed recursively', parsePositiveInteger('max-files'), 500)
   .option('--max-file-size <mb>', 'Maximum script size parsed or downloaded in MB', parsePositiveInteger('max-file-size'), 10)
@@ -727,6 +766,7 @@ const collectCommand = program
   .option('--ai-max-files <n>', 'Maximum downloaded files supplied to AI per target', parsePositiveInteger('ai-max-files'))
   .option('--ai-max-total-size <mb>', 'Maximum total downloaded size supplied to AI per target in MB', parsePositiveInteger('ai-max-total-size'))
   .option('--ai-max-inline-size <kb>', 'Maximum JavaScript content embedded directly in the AI prompt in KB', parsePositiveInteger('ai-max-inline-size'))
+  .option('--ai-include-third-party', 'Download and analyze third-party JavaScript instead of defaulting to target apex scope')
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
   .addHelpText(
@@ -779,6 +819,7 @@ const collectCommand = program
       options.aiMaxFiles,
       options.aiMaxTotalSize,
       options.aiMaxInlineSize,
+      options.aiIncludeThirdParty,
     ];
     if (!options.ai && aiOnlyOptions.some(value => value !== undefined)) {
       throw new Error('AI analysis options require --ai');

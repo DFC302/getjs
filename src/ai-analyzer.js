@@ -426,6 +426,7 @@ function buildAnalysisPrompt(instructions, context) {
     'Analyze statically and read-only. Do not execute code, make network requests, inspect unrelated files, or modify the workspace.',
     'When file contents are embedded in the run context, analyze those values directly and do not use tools to reread those files.',
     'Embedded chunks include original byte ranges. A file is fully covered only when its content record has complete=true; otherwise report partial coverage and preserve original byte offsets in evidence.',
+    'For chunked full-review passes, analyze every supplied character in the current range and report evidence only from that range; getjs will merge all passes.',
     'Return only one JSON object conforming to the separately supplied schema. Do not wrap it in Markdown.',
     'Use the exact target and run metadata supplied below. Empty categories must be empty arrays; never fabricate findings.',
   ].join('\n');
@@ -865,6 +866,225 @@ function writePrivateText(filePath, content) {
   }
 }
 
+function buildFullReviewChunks(manifest, maxChunkBytes) {
+  const chunks = [];
+  for (const record of manifest.selected) {
+    if (record.size === 0) {
+      chunks.push({
+        file: record.file,
+        start_byte: 0,
+        end_byte_exclusive: 0,
+        start_line: 1,
+        complete: true,
+        content: '',
+      });
+      continue;
+    }
+    const source = fs.readFileSync(record.sourcePath);
+    let startLine = 1;
+    for (let startByte = 0; startByte < record.size;) {
+      let endByte = Math.min(startByte + maxChunkBytes, record.size);
+      // Avoid splitting a valid UTF-8 code point between provider passes.
+      while (endByte < record.size && endByte > startByte && (source[endByte] & 0xc0) === 0x80) endByte -= 1;
+      if (endByte === startByte) endByte = Math.min(startByte + maxChunkBytes, record.size);
+      const content = source.subarray(startByte, endByte).toString('utf8');
+      chunks.push({
+        file: record.file,
+        start_byte: startByte,
+        end_byte_exclusive: endByte,
+        start_line: startLine,
+        complete: startByte === 0 && endByte === record.size,
+        content,
+      });
+      startLine += (content.match(/\n/g) || []).length;
+      startByte = endByte;
+    }
+  }
+  return chunks;
+}
+
+function namespaceReport(report, batchNumber, chunk, totalBatches) {
+  const namespaced = JSON.parse(JSON.stringify(report));
+  const prefix = totalBatches > 1 ? `B${String(batchNumber + 1).padStart(3, '0')}-` : '';
+  const idMap = new Map();
+  const collectIds = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(collectIds);
+    if (typeof value.id === 'string') idMap.set(value.id, `${prefix}${value.id}`);
+    Object.values(value).forEach(collectIds);
+  };
+  collectIds(namespaced.evidence);
+  collectIds(namespaced.inventory);
+  collectIds(namespaced.findings);
+
+  const referenceFields = new Set([
+    'evidence_ids',
+    'related_endpoint_ids',
+    'related_inventory_ids',
+    'related_ids',
+  ]);
+  const rewrite = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(rewrite);
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'id' && typeof item === 'string' && idMap.has(item)) value[key] = idMap.get(item);
+      else if (key === 'endpoint_id' && typeof item === 'string' && idMap.has(item)) value[key] = idMap.get(item);
+      else if (referenceFields.has(key) && Array.isArray(item)) {
+        value[key] = item.map(id => idMap.get(id) || id);
+      } else rewrite(item);
+    }
+  };
+  rewrite(namespaced);
+
+  for (const evidence of namespaced.evidence || []) {
+    if (evidence.byte_offset !== null && chunk.start_byte > 0 && evidence.byte_offset < chunk.start_byte) {
+      evidence.byte_offset += chunk.start_byte;
+    }
+    if (evidence.line !== null && chunk.start_line > 1 && evidence.line < chunk.start_line) {
+      evidence.line += chunk.start_line - 1;
+    }
+  }
+  return namespaced;
+}
+
+function mergeBatchReports(reports, manifest, run, target) {
+  if (reports.length === 0) throw new Error('AI provider returned no batch reports');
+  const uniqueStrings = values => [...new Set(values.filter(value => typeof value === 'string' && value))];
+  const merged = {
+    schema_version: reports[0].schema_version,
+    run,
+    target,
+    executive_summary: uniqueStrings(reports.flatMap(report => report.executive_summary || [])),
+    coverage: {
+      files_provided: manifest.selected.length,
+      files_analyzed: manifest.selected.map(record => record.file),
+      files_skipped: [],
+      bytes_provided: manifest.selectedBytes,
+      bytes_analyzed: manifest.selectedBytes,
+      complete: manifest.skipped.length === 0,
+      notes: [`Full byte coverage completed across ${reports.length} AI analysis pass${reports.length === 1 ? '' : 'es'}.`],
+    },
+    evidence: reports.flatMap(report => report.evidence || []),
+    inventory: {},
+    findings: reports.flatMap(report => report.findings || []),
+    hunt_plan: reports.flatMap(report => report.hunt_plan || []),
+    global_limitations: uniqueStrings(reports.flatMap(report => report.global_limitations || [])),
+  };
+  for (const key of Object.keys(reports[0].inventory || {})) {
+    merged.inventory[key] = reports.flatMap(report => report.inventory?.[key] || []);
+  }
+  if (reports.length > 1) {
+    merged.global_limitations.push(
+      'Large inputs were reviewed in complete byte-range passes; correlations spanning chunk boundaries may require manual follow-up.',
+    );
+  }
+  return merged;
+}
+
+function mergeArrayValues(first = [], second = []) {
+  const seen = new Set();
+  return [...first, ...second].filter(item => {
+    const key = typeof item === 'object' ? JSON.stringify(item) : `${typeof item}:${String(item)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function mergeDuplicateRecord(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (Array.isArray(value)) target[key] = mergeArrayValues(target[key], value);
+    else if ((target[key] === null || target[key] === '' || target[key] === undefined) && value != null) target[key] = value;
+  }
+}
+
+function deduplicateRecords(records, keyForRecord, idRemap) {
+  const byKey = new Map();
+  const deduplicated = [];
+  for (const record of records || []) {
+    const key = keyForRecord(record);
+    if (!byKey.has(key)) {
+      byKey.set(key, record);
+      deduplicated.push(record);
+      continue;
+    }
+    const existing = byKey.get(key);
+    if (record.id && existing.id && record.id !== existing.id) idRemap.set(record.id, existing.id);
+    mergeDuplicateRecord(existing, record);
+  }
+  return deduplicated;
+}
+
+function deduplicateMergedReport(report) {
+  const idRemap = new Map();
+  const lower = value => String(value ?? '').trim().toLowerCase();
+  const inventory = report.inventory;
+  report.evidence = deduplicateRecords(
+    report.evidence,
+    item => `${lower(item.file)}|${item.byte_offset}|${item.line}|${item.column}|${item.snippet}`,
+    idRemap,
+  );
+  inventory.endpoints = deduplicateRecords(inventory.endpoints, item => lower(item.url), idRemap);
+  inventory.graphql_operations = deduplicateRecords(
+    inventory.graphql_operations,
+    item => `${lower(item.operation_type)}|${lower(item.operation_name)}|${lower(item.document_or_hash)}`,
+    idRemap,
+  );
+  inventory.realtime_channels = deduplicateRecords(
+    inventory.realtime_channels,
+    item => `${lower(item.transport)}|${lower(item.url)}`,
+    idRemap,
+  );
+  inventory.routes_and_features = deduplicateRecords(
+    inventory.routes_and_features,
+    item => `${lower(item.kind)}|${lower(item.route_or_feature)}`,
+    idRemap,
+  );
+  inventory.data_entities = deduplicateRecords(inventory.data_entities, item => lower(item.name), idRemap);
+  inventory.secrets = deduplicateRecords(
+    inventory.secrets,
+    item => `${lower(item.type)}|${lower(item.value)}`,
+    idRemap,
+  );
+  inventory.technologies = deduplicateRecords(
+    inventory.technologies,
+    item => `${lower(item.name)}|${lower(item.version)}`,
+    idRemap,
+  );
+  inventory.third_party_integrations = deduplicateRecords(
+    inventory.third_party_integrations,
+    item => lower(item.name),
+    idRemap,
+  );
+  report.findings = deduplicateRecords(
+    report.findings,
+    item => `${lower(item.category)}|${lower(item.title)}`,
+    idRemap,
+  );
+  report.hunt_plan = deduplicateRecords(report.hunt_plan, item => lower(item.objective), idRemap);
+
+  const referenceFields = new Set([
+    'evidence_ids',
+    'related_endpoint_ids',
+    'related_inventory_ids',
+    'related_ids',
+  ]);
+  const rewriteReferences = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(rewriteReferences);
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'endpoint_id' && typeof item === 'string') value[key] = idRemap.get(item) || item;
+      else if (referenceFields.has(key) && Array.isArray(item)) {
+        value[key] = mergeArrayValues(item.map(id => idRemap.get(id) || id), []);
+      } else rewriteReferences(item);
+    }
+  };
+  rewriteReferences(report);
+  report.executive_summary = mergeArrayValues(report.executive_summary, []);
+  report.global_limitations = mergeArrayValues(report.global_limitations, []);
+  return report;
+}
+
 async function analyzeDownloadedFiles(downloads, options = {}) {
   const settings = options.settings || resolveAISettings(options);
   const executable = executableFromPath(settings.executable);
@@ -889,72 +1109,108 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
     contains_unredacted_secrets: true,
   };
   const tempDirectory = fs.mkdtempSync(path.join(getAITempRoot(), 'run-'));
-  const providerOutput = path.join(tempDirectory, 'provider-output.json');
   let rawReport;
-  let processResult;
-  let fileContents;
+  let fullCoverageContents;
+  let providerCalls = 0;
   try {
     const isolatedWorkspace = materializeAnalysisWorkspace(manifest, tempDirectory);
     const providerEnvironment = settings.provider === 'codex'
       ? prepareCodexEnvironment(tempDirectory, settings.codexHome)
       : process.env;
-    let inlineBudget = settings.maxInlineBytes;
-    let prompt;
-    do {
-      fileContents = buildInlineFileContents(manifest, inlineBudget);
-      const context = {
-        target: options.target || '',
-        run,
-        coverage_contract: {
-          files_provided: manifest.selected.length,
-          bytes_provided: manifest.selectedBytes,
-          host_skipped_files: manifest.skipped.map(record => ({
-            file: normalizeRelativePath(path.basename(record.file)),
-            url: record.url || null,
-            size: record.size || 0,
-            reason: record.reason,
-          })),
-        },
-        files: manifest.selected,
-        file_contents: fileContents,
-      };
-      prompt = buildAnalysisPrompt(instructions, context);
-      if (settings.provider !== 'codex' || prompt.length <= 900000 || inlineBudget <= 65536) break;
-      inlineBudget = Math.max(65536, Math.floor(inlineBudget / 2));
-    } while (true);
-    if (settings.provider === 'codex' && prompt.length > 1000000) {
-      throw new Error(
-        'Codex input exceeds its safe non-interactive size limit; shorten the custom prompt or lower --ai-max-inline-size',
-      );
-    }
-    const providerSettings = { ...settings, workspace: isolatedWorkspace };
-    const args = settings.provider === 'codex'
-      ? buildCodexArgs(providerSettings, providerOutput)
-      : buildClaudeArgs(providerSettings, schema);
-    processResult = await runProcess(executable, args, {
-      cwd: isolatedWorkspace,
-      env: providerEnvironment,
-      input: prompt,
-      timeoutMs: settings.timeoutSeconds * 1000,
-    });
-    if (processResult.status !== 0) {
-      const detail = processResult.stderr.trim().slice(-4000) || processResult.stdout.trim().slice(-4000);
-      throw new Error(`${settings.provider} exited with status ${processResult.status}${detail ? `: ${detail}` : ''}`);
+    let chunkBytes = settings.maxInlineBytes;
+    let chunks;
+    let prompts;
+    while (true) {
+      chunks = buildFullReviewChunks(manifest, chunkBytes);
+      prompts = chunks.map((chunk, index) => {
+        const record = manifest.selected.find(item => item.file === chunk.file);
+        const context = {
+          target: options.target || '',
+          run,
+          coverage_contract: {
+            mode: 'full_file_chunked_review',
+            pass: index + 1,
+            total_passes: chunks.length,
+            instruction: 'Analyze only the supplied byte range in this pass. Every range will be analyzed and merged by getjs.',
+            files_provided: manifest.selected.length,
+            bytes_provided: manifest.selectedBytes,
+            host_skipped_files: manifest.skipped.map(skipped => ({
+              file: normalizeRelativePath(path.basename(skipped.file)),
+              url: skipped.url || null,
+              size: skipped.size || 0,
+              reason: skipped.reason,
+            })),
+          },
+          files: [record],
+          file_contents: [chunk],
+        };
+        return buildAnalysisPrompt(instructions, context);
+      });
+      if (settings.provider !== 'codex' || prompts.every(prompt => prompt.length <= 900000)) break;
+      if (chunkBytes <= 16384) {
+        throw new Error(
+          'Codex input exceeds its safe non-interactive size limit; shorten the custom prompt or lower --ai-max-inline-size',
+        );
+      }
+      chunkBytes = Math.max(16384, Math.floor(chunkBytes / 2));
     }
 
-    if (settings.provider === 'codex') {
-      const output = fs.existsSync(providerOutput)
-        ? fs.readFileSync(providerOutput, 'utf8')
-        : processResult.stdout;
-      rawReport = parseJsonText(output, 'Codex structured output');
-    } else {
-      rawReport = unwrapClaudeOutput(processResult.stdout);
+    const batchReports = [];
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      if (typeof options.onProgress === 'function') {
+        options.onProgress({
+          pass: index + 1,
+          totalPasses: chunks.length,
+          file: chunk.file,
+          startByte: chunk.start_byte,
+          endByte: chunk.end_byte_exclusive,
+        });
+      }
+      const providerOutput = path.join(tempDirectory, `provider-output-${index + 1}.json`);
+      const providerSettings = { ...settings, workspace: isolatedWorkspace };
+      const args = settings.provider === 'codex'
+        ? buildCodexArgs(providerSettings, providerOutput)
+        : buildClaudeArgs(providerSettings, schema);
+      const processResult = await runProcess(executable, args, {
+        cwd: isolatedWorkspace,
+        env: providerEnvironment,
+        input: prompts[index],
+        timeoutMs: settings.timeoutSeconds * 1000,
+      });
+      providerCalls += 1;
+      if (processResult.status !== 0) {
+        const detail = processResult.stderr.trim().slice(-4000) || processResult.stdout.trim().slice(-4000);
+        throw new Error(
+          `${settings.provider} pass ${index + 1}/${chunks.length} exited with status ${processResult.status}`
+          + `${detail ? `: ${detail}` : ''}`,
+        );
+      }
+
+      const parsed = settings.provider === 'codex'
+        ? parseJsonText(
+          fs.existsSync(providerOutput) ? fs.readFileSync(providerOutput, 'utf8') : processResult.stdout,
+          `Codex structured output for pass ${index + 1}`,
+        )
+        : unwrapClaudeOutput(processResult.stdout);
+      validateAgainstSchema(parsed, schema, schema);
+      assertRootReportShape(parsed);
+      batchReports.push(namespaceReport(parsed, index, chunk, chunks.length));
     }
+
+    rawReport = deduplicateMergedReport(mergeBatchReports(batchReports, manifest, run, options.target || ''));
+    fullCoverageContents = manifest.selected.map(record => ({
+      file: record.file,
+      start_byte: 0,
+      end_byte_exclusive: record.size,
+      complete: true,
+      content: '',
+    }));
   } finally {
     fs.rmSync(tempDirectory, { recursive: true, force: true });
   }
 
-  const report = normalizeReport(rawReport, manifest, run, options.target || '', schema, fileContents);
+  const report = normalizeReport(rawReport, manifest, run, options.target || '', schema, fullCoverageContents);
   const reportPath = path.resolve(options.reportPath || path.join(manifest.workspace, 'getjs-ai-analysis.json'));
   const markdownPath = reportPath.toLowerCase().endsWith('.json')
     ? `${reportPath.slice(0, -5)}.md`
@@ -976,6 +1232,7 @@ async function analyzeDownloadedFiles(downloads, options = {}) {
     findings: report.findings.length,
     huntPlanItems: report.hunt_plan.length,
     complete: report.coverage.complete,
+    providerCalls,
   };
 }
 
@@ -990,6 +1247,7 @@ module.exports = {
   buildManifest,
   buildInlineFileContents,
   createDefaultAIConfig,
+  deduplicateMergedReport,
   executableFromPath,
   getAIStatus,
   getDefaultAIConfigPath,
@@ -999,4 +1257,5 @@ module.exports = {
   renderMarkdown,
   resolveAISettings,
   unwrapClaudeOutput,
+  validateAgainstSchema,
 };

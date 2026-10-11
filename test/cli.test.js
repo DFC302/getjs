@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { version } = require('../package.json');
+const { filterUrls, matchDomainPattern } = require('../bin/getjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 const cli = path.join(projectRoot, 'bin', 'getjs.js');
@@ -28,6 +29,8 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /--ai \[provider\]/);
   assert.match(defaultHelp.stdout, /--prompt <file>/);
   assert.match(defaultHelp.stdout, /--ai-max-inline-size <kb>/);
+  assert.match(defaultHelp.stdout, /--ai-include-third-party/);
+  assert.match(defaultHelp.stdout, /--no-source-maps/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
 });
 
@@ -39,6 +42,27 @@ test('version is available at both command levels', () => {
   assert.equal(collectVersion.status, 0);
   assert.equal(rootVersion.stdout, collectVersion.stdout);
   assert.equal(rootVersion.stdout.trim(), version);
+});
+
+test('bare apex filter scopes include subdomains without matching lookalikes', () => {
+  assert.equal(matchDomainPattern('allerganaccessma.com', 'allerganaccessma.com'), true);
+  assert.equal(matchDomainPattern('www.allerganaccessma.com', 'allerganaccessma.com'), true);
+  assert.equal(matchDomainPattern('api.dev.allerganaccessma.com', '*.allerganaccessma.com'), true);
+  assert.equal(matchDomainPattern('evilallerganaccessma.com', 'allerganaccessma.com'), false);
+});
+
+test('AI mode defaults downloads to the target registrable domain', () => {
+  const filtered = filterUrls([
+    'https://www.allerganaccessma.com/app.js',
+    'https://api.allerganaccessma.com/runtime.js',
+    'https://allerganaccessma.com/root.js',
+    'https://www.googletagmanager.com/gtm.js',
+  ], { ai: 'codex' }, 'https://www.allerganaccessma.com/');
+  assert.deepEqual(filtered, [
+    'https://www.allerganaccessma.com/app.js',
+    'https://api.allerganaccessma.com/runtime.js',
+    'https://allerganaccessma.com/root.js',
+  ]);
 });
 
 test('auth command documents secure interactive storage-state capture', () => {

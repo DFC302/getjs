@@ -29,6 +29,7 @@ function startFixtureServer() {
         <link rel="modulepreload" href="./preload.js">
         <link rel="prefetch" href="./prefetched.js">
         <script type="module" src="./main.js"></script>
+        <script src="/runtime"></script>
         <script data-src="/deferred.js"></script>
         <script type="module">if (false) import('./inline-lazy.js')</script>
         <iframe src="/frame.html"></iframe>
@@ -90,6 +91,25 @@ function startFixtureServer() {
       return;
     }
 
+    if (pathname === '/app/main.js.map') {
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({
+        version: 3,
+        file: 'main.js',
+        sources: ['src/hidden.js'],
+        sourcesContent: ['export const hidden = true;'],
+        names: [],
+        mappings: '',
+      }));
+      return;
+    }
+
+    if (pathname === '/runtime') {
+      response.setHeader('content-type', 'application/javascript');
+      response.end('window.extensionlessRuntime = true;');
+      return;
+    }
+
     if (Object.hasOwn(scripts, pathname)) {
       response.setHeader('content-type', 'application/javascript');
       response.end(scripts[pathname]);
@@ -135,6 +155,7 @@ test('collector continues with active requests and recursively discovers depende
 
     for (const expected of [
       '/app/main.js',
+      '/app/main.js.map',
       '/app/dep.js',
       '/app/nested.js',
       '/app/preload.js',
@@ -149,6 +170,7 @@ test('collector continues with active requests and recursively discovers depende
       '/frame.js',
       '/route-only.js',
       '/sw.js',
+      '/runtime',
     ]) {
       assert.ok(paths.has(expected), `missing ${expected}`);
     }
@@ -158,7 +180,9 @@ test('collector continues with active requests and recursively discovers depende
     assert.ok(metadata.redirects.some(url => url.endsWith('/start')));
     assert.ok(metadata.redirects.some(url => url.endsWith('/app/index.html')));
     assert.ok(metadata.staticDiscovered >= 3);
-    assert.equal(metadata.pagesCrawled, 1);
+    assert.ok(metadata.sourceMaps.some(url => new URL(url).pathname === '/app/main.js.map'));
+    assert.equal(metadata.pagesCrawled, 2);
+    assert.equal(fixture.requestedPaths.has('/admin'), true);
     assert.equal(fixture.requestedPaths.has('/logout'), false);
     assert.equal(paths.has('/should-not-load.js'), false);
     assert.equal(paths.has('/app/data.json'), false);

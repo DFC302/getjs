@@ -726,6 +726,7 @@ const collectCommand = program
   .option('--ai-concurrency <n>', 'Concurrent AI analyses in multi-target mode', parsePositiveInteger('ai-concurrency'))
   .option('--ai-max-files <n>', 'Maximum downloaded files supplied to AI per target', parsePositiveInteger('ai-max-files'))
   .option('--ai-max-total-size <mb>', 'Maximum total downloaded size supplied to AI per target in MB', parsePositiveInteger('ai-max-total-size'))
+  .option('--ai-max-inline-size <kb>', 'Maximum JavaScript content embedded directly in the AI prompt in KB', parsePositiveInteger('ai-max-inline-size'))
   .option('-s, --silent', 'Suppress banner and status messages')
   .option('-v, --verbose', 'Verbose output')
   .addHelpText(
@@ -777,6 +778,7 @@ const collectCommand = program
       options.aiConcurrency,
       options.aiMaxFiles,
       options.aiMaxTotalSize,
+      options.aiMaxInlineSize,
     ];
     if (!options.ai && aiOnlyOptions.some(value => value !== undefined)) {
       throw new Error('AI analysis options require --ai');
@@ -936,6 +938,7 @@ aiCommand
     console.log(`Executable: ${status.executable || `${status.configuredExecutable} (not found)`}`);
     console.log(`Version: ${status.version || 'unknown'}`);
     console.log(`Model: ${status.model || 'provider default'}`);
+    if (status.provider === 'codex') console.log(`Codex auth source: ${status.codexHome}`);
     console.log(`Prompt: ${status.promptPath}`);
     console.log(`Schema: ${status.schemaPath}`);
     console.log(`Config: ${status.configPath || `${status.defaultConfigPath} (not created; built-in defaults active)`}`);

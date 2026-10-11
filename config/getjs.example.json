@@ -5,12 +5,14 @@
     "timeoutSeconds": 900,
     "maxFiles": 250,
     "maxTotalBytes": 104857600,
+    "maxInlineBytes": 524288,
     "concurrency": 1
   },
   "providers": {
     "codex": {
       "executable": "codex",
-      "model": null
+      "model": null,
+      "home": null
     },
     "claude": {
       "executable": "claude",

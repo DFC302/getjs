@@ -353,6 +353,7 @@ Verification is disabled by default because it can make outbound requests contai
 | `--ai-concurrency <n>` | Concurrent provider runs for multiple targets | 1 |
 | `--ai-max-files <n>` | Maximum files sent per target | 250 |
 | `--ai-max-total-size <mb>` | Maximum total input size per target | 100 MB |
+| `--ai-max-inline-size <kb>` | Maximum source content embedded directly in the provider prompt | 512 KB |
 
 Reports include a reusable evidence ledger, endpoint and parameter inventory, GraphQL operations, WebSocket/SSE channels, routes and feature flags, sensitive data entities, secret candidates, technologies and third-party integrations, security findings, and a prioritized hunt plan. The security review asks for DOM XSS sources and sinks, unsafe `postMessage`, client-side request forgery/open redirect behavior, prototype pollution, auth/OAuth/session weaknesses, storage and token exposure, service-worker and worker risks, risky file handling, business-logic clues, and missing browser defenses. These are static-analysis leads, not confirmed vulnerabilities.
 
@@ -375,10 +376,11 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
     "timeoutSeconds": 900,
     "maxFiles": 250,
     "maxTotalBytes": 104857600,
+    "maxInlineBytes": 524288,
     "concurrency": 1
   },
   "providers": {
-    "codex": { "executable": "codex", "model": null },
+    "codex": { "executable": "codex", "model": null, "home": null },
     "claude": { "executable": "claude", "model": null }
   }
 }
@@ -386,7 +388,7 @@ getjs ai status [--provider codex|claude] [--ai-config <file>]
 
 Relative prompt paths in the config are resolved from the config file's directory. `"builtin"` selects the prompt shipped with getjs. Command-line values override config values. `getjs ai status` resolves the executable and displays its version, model, prompt, schema, and active config before you run a target.
 
-The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries.
+The mandatory execution wrapper remains in effect with a custom prompt: downloaded files are untrusted data, analysis is static and read-only, network activity is disabled where the provider supports it, and the response must match the bundled schema. A custom prompt changes the analysis goals, not these safety boundaries. getjs embeds up to `maxInlineBytes` of source directly in the provider input so ordinary runs do not depend on model-initiated filesystem commands; larger inputs remain available in the isolated read-only workspace. For Codex, getjs creates a private temporary writable `CODEX_HOME` under the user's cache directory, copies an existing file-based `auth.json` into it with mode `0600`, and removes the temporary home after the run. This lets Codex write required process and socket state while the staged JavaScript files remain read-only. Set `providers.codex.home` when the authenticated source profile is somewhere other than `CODEX_HOME` or `~/.codex`. Final reports are written by getjs to the requested report path.
 
 #### Scanner Management Command
 

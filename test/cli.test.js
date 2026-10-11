@@ -27,6 +27,7 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /-u, --url <url>/);
   assert.match(defaultHelp.stdout, /--ai \[provider\]/);
   assert.match(defaultHelp.stdout, /--prompt <file>/);
+  assert.match(defaultHelp.stdout, /--ai-max-inline-size <kb>/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
 });
 

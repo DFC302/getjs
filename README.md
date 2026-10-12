@@ -2,16 +2,27 @@
 
 A browser-backed JavaScript URL extractor for security researchers. It combines runtime network observation, DOM inspection, and bounded recursive bundle parsing to discover JavaScript used or referenced by web applications.
 
-## References
+## README Reference
 
-- [TruffleHog documentation](https://github.com/trufflesecurity/trufflehog) and [official releases](https://github.com/trufflesecurity/trufflehog/releases)
-- [Playwright library documentation](https://playwright.dev/docs/library) and [browser installation](https://playwright.dev/docs/browsers)
-- [Commander.js documentation](https://github.com/tj/commander.js)
-- [`psl` Public Suffix List parser](https://github.com/lupomontero/psl)
-- [OpenAPI Specification 3.1.0](https://spec.openapis.org/oas/v3.1.0.html) and [Swagger UI documentation](https://swagger.io/docs/open-source-tools/swagger-ui/usage/installation/)
-- [npm lifecycle scripts](https://docs.npmjs.com/cli/using-npm/scripts/)
-- [Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli)
-- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+| Section | Contents |
+|---------|----------|
+| [Features](#features) | Supported discovery, authentication, download, scanning, and analysis capabilities |
+| [Installation](#installation) | Prerequisites, setup methods, updates, troubleshooting, and uninstalling |
+| [Choose a Workflow](#choose-a-workflow) | Commands for the most common getjs tasks |
+| [Quick Start](#quick-start) | Short command examples for first-time use |
+| [CLI Reference](#cli-reference) | Complete commands, options, defaults, and configuration |
+| [Usage Examples](#usage-examples) | Reconnaissance, multi-domain, filtering, proxy, and pipeline examples |
+| [Authenticated Scanning](#authenticated-scanning) | Cookies, storage state, custom headers, and interactive login workflows |
+| [Secret Scanning Pipeline](#secret-scanning-pipeline) | TruffleHog collection, scanning, verification, and reporting |
+| [AI-Assisted Analysis](#ai-assisted-javascript-analysis) | Codex and Claude endpoint or full security analysis |
+| [Programmatic Usage](#programmatic-usage) | Using getjs as a Node.js library |
+| [Architecture](#architecture) | Main components and data flow |
+| [How It Works](#how-it-works) | End-to-end collection and analysis sequence |
+| [Exit Status](#exit-status) | Process exit codes and meanings |
+| [Limitations](#limitations) | Known coverage and validation boundaries |
+| [Future Improvements](#future-improvements) | Implemented and planned work |
+| [License](#license) | Project license |
+| [Contributing](#contributing) | Contribution guidance |
 
 ## Features
 

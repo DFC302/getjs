@@ -31,10 +31,12 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
   - Playwright storage-state files containing cookies and per-origin localStorage
   - Origin-scoped custom HTTP headers and localStorage values
 - **Integrated Interactive Authentication** - Log in through a headed browser, preserve the live session, discard pre-login collection noise, and scan the authenticated application page
+- **Authenticated Manual Exploration** - After login, click through application features while getjs retains the resulting scripts and API traffic; cross-host navigation no longer aborts collection
 - **Reusable Auth Capture** - Save a mode-`0600` storage-state file with either `getjs auth` or the integrated collection workflow
 - **Auth-Aware Downloads** - Downloaded JS files carry browser session cookies/headers
 - **Safe Downloads** - Enforces size limits, rejects HTML responses, follows bounded redirects, scopes credentials per redirect, and uses collision-safe filenames
 - **Navigation Diagnostics** - Reports final URLs, redirect chains, failed requests, and authentication-related redirects in JSON output
+- **Partial Failure Recovery** - Fatal collection errors preserve discovered URLs, coverage metadata, and any available API inventory before exit
 - **Domain Filtering** - Whitelist/blacklist JS URLs by domain pattern
 - **Flexible Output** - Per-domain files, combined file, JSON, or stdout
 - **Resume Mode** - Incremental scanning skips already-discovered URLs
@@ -393,18 +395,32 @@ getjs -u https://apply.example.com/ \
   --download-dir ./candidate-js
 ```
 
-getjs opens the login URL in a visible browser. Complete the entire login and
-leave a page on the target origin open, then press Enter in the terminal. It
-keeps that exact browser context and tab (including in-memory `sessionStorage`),
-removes login-phase scripts and traffic from the results, and reloads the
-confirmed authenticated page as the first collection page. The target origin
-continues to define API scope. An optional authentication check can prevent a
-mistaken confirmation from starting collection.
+getjs opens the login URL in a visible browser and uses two prompts. First,
+complete the entire login and press Enter. getjs then removes login-phase
+scripts and traffic, reloads the authenticated application page, and starts a
+clean capture phase. Click through the application and open the features you
+want observed, then press Enter a second time to finish manual exploration and
+continue the automated crawl and download steps.
+
+The same browser context and tab are retained, including in-memory
+`sessionStorage`. If a click takes that tab to another host, getjs records the
+traffic, returns the tab to the authenticated target page, and continues rather
+than aborting. Domain filters still decide which observed JavaScript is included
+in output and downloads, while the original target origin defines API inventory
+scope. An optional authentication check can prevent a mistaken confirmation
+from starting collection.
 
 `--interactive-auth` accepts exactly one target and requires a terminal. A
 saved Playwright storage-state file contains cookies and localStorage but not
 sessionStorage; the current integrated run still retains sessionStorage because
 it does not replace the live context. Treat saved state as a credential.
+
+If a fatal collector error occurs, getjs writes every URL collected up to that
+point to the requested `--output`/`--output-dir`. Without either option it uses
+`<download-dir>/getjs-partial-urls.txt`. A private adjacent `.partial.json`
+records the error and coverage metadata, and any requested API inventory is
+also written. JavaScript files downloaded before a later-stage failure remain
+in the download directory.
 
 #### Entry Points, API Inventory, and Imports
 
@@ -1068,7 +1084,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.9                          │
+│                        getjs v2.9.1                         │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │

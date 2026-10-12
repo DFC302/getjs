@@ -90,6 +90,7 @@ class JSCollector {
       interactiveAuth: options.interactiveAuth === true,
       loginUrl: options.loginUrl || null,
       interactiveAuthHandler: options.interactiveAuthHandler || null,
+      interactiveExploreHandler: options.interactiveExploreHandler || null,
     };
 
     this.jsUrls = new Set();
@@ -132,6 +133,12 @@ class JSCollector {
     if (this.options.verbose) {
       console.error(`[*] ${message}`);
     }
+  }
+
+  recordBackgroundError(source, error) {
+    const warning = `${source} failed: ${error?.message || String(error)}`;
+    if (!this.metadata.warnings.includes(warning)) this.metadata.warnings.push(warning);
+    this.log(warning);
   }
 
   normalizeUrl(url, baseUrl) {
@@ -538,10 +545,20 @@ class JSCollector {
 
     const initialization = (async () => {
       page.on('websocket', (webSocket) => {
-        if (this.options.captureApi) this.apiInventory?.observeWebSocket(webSocket, page.url() || this.targetUrl);
-        const inspectFrame = event => this.extractPayloadUrls(event.payload, page.url() || this.targetUrl, 'WebSocket');
-        webSocket.on('framereceived', inspectFrame);
-        webSocket.on('framesent', inspectFrame);
+        try {
+          if (this.options.captureApi) this.apiInventory?.observeWebSocket(webSocket, page.url() || this.targetUrl);
+          const inspectFrame = event => {
+            try {
+              this.extractPayloadUrls(event.payload, page.url() || this.targetUrl, 'WebSocket');
+            } catch (error) {
+              this.recordBackgroundError('WebSocket inspection', error);
+            }
+          };
+          webSocket.on('framereceived', inspectFrame);
+          webSocket.on('framesent', inspectFrame);
+        } catch (error) {
+          this.recordBackgroundError('WebSocket setup', error);
+        }
       });
 
       const bindingName = `__getjs_report_script_${Math.random().toString(36).slice(2)}`;
@@ -593,62 +610,78 @@ class JSCollector {
 
   async setupInterceptors(targetUrl) {
     this.context.on('request', (request) => {
-      if (this.options.captureApi) {
-        let pageUrl = null;
-        try { pageUrl = request.frame().url(); } catch {}
-        this.apiInventory?.observeRequest(request, pageUrl);
-      }
-      if (request.resourceType() === 'script') {
-        let baseUrl = targetUrl;
-        try {
-          baseUrl = request.frame().url() || targetUrl;
-        } catch (error) {
-          // Service Worker requests are not associated with a frame.
+      try {
+        if (this.options.captureApi) {
+          let pageUrl = null;
+          try { pageUrl = request.frame().url(); } catch {}
+          this.apiInventory?.observeRequest(request, pageUrl);
         }
-        // Chromium's resource classification is authoritative for extensionless
-        // script endpoints (for example, module aggregators ending in /m=root).
-        this.recordJsUrl(request.url(), baseUrl, 'request', true);
-      }
+        if (request.resourceType() === 'script') {
+          let baseUrl = targetUrl;
+          try {
+            baseUrl = request.frame().url() || targetUrl;
+          } catch (error) {
+            // Service Worker requests are not associated with a frame.
+          }
+          // Chromium's resource classification is authoritative for extensionless
+          // script endpoints (for example, module aggregators ending in /m=root).
+          this.recordJsUrl(request.url(), baseUrl, 'request', true);
+        }
 
-      if (request.isNavigationRequest() && request.frame() === this.page.mainFrame()) {
-        const previous = this.metadata.redirects[this.metadata.redirects.length - 1];
-        if (previous !== request.url()) this.metadata.redirects.push(request.url());
+        if (this.isTopLevelNavigationRequest(request)) {
+          const previous = this.metadata.redirects[this.metadata.redirects.length - 1];
+          if (previous !== request.url()) this.metadata.redirects.push(request.url());
+        }
+      } catch (error) {
+        this.recordBackgroundError('Request interception', error);
       }
     });
 
     this.context.on('response', (response) => {
-      if (this.options.captureApi) this.apiInventory?.observeResponse(response);
-      // response.allHeaders() can remain pending for streaming responses. The
-      // regular header map is synchronous and includes Content-Type, which is
-      // the only response header collection needs.
-      const contentType = response.headers()['content-type'] || '';
-      if (this.isJavaScriptUrl(response.url(), contentType)) {
-        // Keep responses identified by JavaScript Content-Type even when the
-        // URL has no conventional script extension.
-        this.recordJsUrl(response.url(), targetUrl, 'response', true);
+      try {
+        if (this.options.captureApi) this.apiInventory?.observeResponse(response);
+        // response.allHeaders() can remain pending for streaming responses. The
+        // regular header map is synchronous and includes Content-Type, which is
+        // the only response header collection needs.
+        const contentType = response.headers()['content-type'] || '';
+        if (this.isJavaScriptUrl(response.url(), contentType)) {
+          // Keep responses identified by JavaScript Content-Type even when the
+          // URL has no conventional script extension.
+          this.recordJsUrl(response.url(), targetUrl, 'response', true);
+        }
+      } catch (error) {
+        this.recordBackgroundError('Response interception', error);
       }
     });
 
     this.context.on('requestfailed', (request) => {
-      const failure = request.failure();
-      this.metadata.failedRequests.push({
-        url: request.url(),
-        error: failure ? failure.errorText : 'unknown error',
-      });
-      if (request.resourceType() === 'script') {
-        let baseUrl = targetUrl;
-        try {
-          baseUrl = request.frame().url() || targetUrl;
-        } catch (error) {
-          // Service Worker requests are not associated with a frame.
+      try {
+        const failure = request.failure();
+        this.metadata.failedRequests.push({
+          url: request.url(),
+          error: failure ? failure.errorText : 'unknown error',
+        });
+        if (request.resourceType() === 'script') {
+          let baseUrl = targetUrl;
+          try {
+            baseUrl = request.frame().url() || targetUrl;
+          } catch (error) {
+            // Service Worker requests are not associated with a frame.
+          }
+          this.recordJsUrl(request.url(), baseUrl, 'failed request', true);
         }
-        this.recordJsUrl(request.url(), baseUrl, 'failed request', true);
+      } catch (error) {
+        this.recordBackgroundError('Failed-request interception', error);
       }
     });
 
     this.context.on('serviceworker', (worker) => {
-      const normalized = this.recordJsUrl(worker.url(), targetUrl, 'service worker', true);
-      if (normalized) this.swScripts.add(normalized);
+      try {
+        const normalized = this.recordJsUrl(worker.url(), targetUrl, 'service worker', true);
+        if (normalized) this.swScripts.add(normalized);
+      } catch (error) {
+        this.recordBackgroundError('Service Worker interception', error);
+      }
     });
 
     this.context.on('page', (page) => {
@@ -656,6 +689,17 @@ class JSCollector {
     });
 
     await this.initializePage(this.page);
+  }
+
+  isTopLevelNavigationRequest(request) {
+    try {
+      return request.isNavigationRequest() && request.frame().parentFrame() === null;
+    } catch {
+      // Playwright can expose a navigation request before its frame object is
+      // created. That request is still captured elsewhere; it is simply not
+      // safe to classify as a top-level redirect yet.
+      return false;
+    }
   }
 
   async scrollPage(page = this.page) {
@@ -1015,6 +1059,43 @@ class JSCollector {
     return confirmedUrl;
   }
 
+  async performAuthenticatedExploration(collectionUrl) {
+    if (typeof this.options.interactiveExploreHandler !== 'function') return;
+    const outcome = await this.options.interactiveExploreHandler({
+      page: this.page,
+      context: this.context,
+      collectionUrl,
+      targetUrl: this.targetUrl,
+      collector: this,
+    }) || {};
+    await this.waitForPendingTasks();
+
+    let targetPage = this.selectAuthenticatedPage(outcome.page);
+    let recoveredTargetPage = false;
+    if (!targetPage) {
+      targetPage = outcome.page && !outcome.page.isClosed()
+        ? outcome.page
+        : (this.page && !this.page.isClosed() ? this.page : await this.context.newPage());
+      await this.initializePage(targetPage);
+      await targetPage.goto(collectionUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: this.options.timeout,
+      });
+      recoveredTargetPage = true;
+    }
+    this.page = targetPage;
+    this.page.setDefaultTimeout(this.options.timeout);
+    for (const page of this.context.pages()) {
+      if (page !== targetPage && !page.isClosed()) await page.close().catch(() => {});
+    }
+    this.metadata.authentication.exploration = {
+      completed_at: new Date().toISOString(),
+      recovered_target_page: recoveredTargetPage,
+      javascript_observed: this.jsUrls.size,
+      api_observations: this.apiInventory?.observations.length || 0,
+    };
+  }
+
   async extractInlineModules(targetUrl, page = this.page) {
     this.log('Extracting module imports from inline scripts...');
 
@@ -1301,6 +1382,9 @@ class JSCollector {
     }
 
     await this.runCollectionStep('Initial load wait', () => this.page.waitForTimeout(2000));
+    if (this.options.interactiveAuth) {
+      await this.performAuthenticatedExploration(collectionUrl);
+    }
     await this.runCollectionStep('DOM script extraction', () => this.extractDomScripts());
 
     if (this.options.scrolling) {

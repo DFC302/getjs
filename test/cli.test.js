@@ -201,6 +201,43 @@ test('interactive storage-state saving is private and does not overwrite by defa
   }
 });
 
+test('fatal collection errors preserve partial URL and metadata files', () => {
+  const { savePartialCollection } = require('../bin/getjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-partial-save-'));
+  const output = path.join(directory, 'urls.txt');
+  const inventory = {
+    observations: [],
+    toJSON: coverage => ({ summary: { observations: 0 }, coverage }),
+  };
+  const collector = {
+    getResults: () => [
+      'https://app.example.test/private.js',
+      'https://third.example.test/generic.js',
+    ],
+    getMetadata: () => ({ coverage: { pages: {}, assets: {}, api: {} } }),
+    getAPIInventory: () => inventory,
+  };
+  try {
+    const recovery = savePartialCollection(collector, {
+      output,
+      downloadDir: directory,
+      filterDomain: ['example.test'],
+      resume: false,
+    }, 'https://app.example.test/', new Error('fixture failure'));
+    assert.deepEqual(fs.readFileSync(output, 'utf8').trim().split('\n'), [
+      'https://app.example.test/private.js',
+      'https://third.example.test/generic.js',
+    ]);
+    assert.equal(fs.statSync(recovery.recoveryPath).mode & 0o777, 0o600);
+    const report = JSON.parse(fs.readFileSync(recovery.recoveryPath, 'utf8'));
+    assert.equal(report.partial, true);
+    assert.equal(report.error, 'fixture failure');
+    assert.equal(report.urls.length, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('secret scanning and scanner management are exposed by the CLI', () => {
   const collectHelp = runCli(['-h']);
   assert.equal(collectHelp.status, 0);

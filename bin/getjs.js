@@ -367,9 +367,15 @@ function createInteractiveAuthHandler(options) {
       prompt.close();
     }
 
-    const authenticatedPage = selectTargetOriginPage(context, targetUrl, page);
+    let authenticatedPage = selectTargetOriginPage(context, targetUrl, page);
     if (!authenticatedPage || authenticatedPage.isClosed()) {
-      throw new Error('No target-origin application page was open after authentication; finish the login redirect before pressing Enter');
+      console.error('[!] The active login tab left the target origin; reopening the target in the same browser session.');
+      authenticatedPage = page && !page.isClosed() ? page : await context.newPage();
+      await collector.initializePage(authenticatedPage);
+      await authenticatedPage.goto(targetUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: options.timeout * 1000,
+      });
     }
     const confirmedUrl = authenticatedPage.url();
     if (looksLikeAuthenticationUrl(confirmedUrl) && !options.authCheckUrl) {
@@ -384,6 +390,19 @@ function createInteractiveAuthHandler(options) {
     const cookies = await context.cookies(targetUrl);
     console.error(`[*] Authentication confirmed; starting clean collection with ${cookies.length} target cookie(s).`);
     return { page: authenticatedPage, savedStorageState, validation };
+  };
+}
+
+function createInteractiveExplorationHandler() {
+  return async () => {
+    console.error('[*] Authenticated capture is now active. Browse the application and open the features you want getjs to observe.');
+    console.error('[*] Cross-host navigation will be recorded and will not abort collection.');
+    const prompt = readline.createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      await prompt.question('Press Enter when authenticated exploration is complete... ');
+    } finally {
+      prompt.close();
+    }
   };
 }
 
@@ -472,6 +491,7 @@ function createCollectorOptions(targetUrl, options, browser = null) {
     interactiveAuth: options.interactiveAuth,
     loginUrl: options.loginUrl,
     interactiveAuthHandler: options.interactiveAuthHandler,
+    interactiveExploreHandler: options.interactiveExploreHandler,
     browser,
   };
 }
@@ -567,6 +587,50 @@ function finalizeCoverage(metadata, downloads, aiAnalysis) {
     metadata.coverage.assets.ai_artifacts_skipped = aiAnalysis.filesProvided - aiAnalysis.filesAnalyzed;
   }
   return metadata.coverage;
+}
+
+function savePartialCollection(collector, options, targetUrl, collectionError) {
+  const discovered = collector.getResults();
+  const filteredUrls = filterUrls(discovered, options, targetUrl);
+  const outputPaths = [];
+  if (options.output) outputPaths.push(path.resolve(options.output));
+  if (options.outputDir) {
+    outputPaths.push(path.join(path.resolve(options.outputDir), sanitizeDomainFilename(targetUrl)));
+  }
+  if (outputPaths.length === 0) {
+    outputPaths.push(path.resolve(options.downloadDir || './js-downloads', 'getjs-partial-urls.txt'));
+  }
+  for (const outputPath of [...new Set(outputPaths)]) {
+    writeUrlFile(outputPath, filteredUrls, options.resume);
+  }
+
+  const metadata = collector.getMetadata();
+  let apiInventoryPath = null;
+  const inventory = collector.getAPIInventory();
+  if (inventory && shouldWriteAPIInventory(options)) {
+    apiInventoryPath = writeAPIInventory(
+      apiInventoryPathForTarget(targetUrl, options),
+      inventory,
+      metadata.coverage,
+    );
+  }
+  const recoveryPath = `${outputPaths[0]}.partial.json`;
+  writePrivateArtifact(recoveryPath, `${JSON.stringify({
+    partial: true,
+    saved_at: new Date().toISOString(),
+    target: targetUrl,
+    error: collectionError?.message || String(collectionError),
+    urls: filteredUrls,
+    url_files: [...new Set(outputPaths)],
+    api_inventory: apiInventoryPath,
+    metadata,
+  }, null, 2)}\n`);
+  return {
+    urls: filteredUrls,
+    outputPaths: [...new Set(outputPaths)],
+    recoveryPath,
+    apiInventoryPath,
+  };
 }
 
 function createDownloader(collector, options) {
@@ -818,6 +882,22 @@ async function collectJS(options) {
     }
 
     return { targetUrl, urls: filteredUrls, metadata, downloads, secretScan, aiAnalysis, apiInventoryPath, error: null };
+  } catch (error) {
+    try {
+      const recovery = savePartialCollection(collector, options, targetUrl, error);
+      log(
+        `[!] Collection failed, but ${recovery.urls.length} discovered JavaScript URLs were preserved in `
+          + `${recovery.outputPaths.join(', ')}`,
+        options.silent,
+      );
+      log(`[!] Partial recovery metadata saved to: ${recovery.recoveryPath} (mode 0600)`, options.silent);
+      if (recovery.apiInventoryPath) {
+        log(`[!] Partial API inventory saved to: ${recovery.apiInventoryPath} (mode 0600)`, options.silent);
+      }
+    } catch (recoveryError) {
+      log(`[!] Could not save partial collection results: ${recoveryError.message}`, options.silent);
+    }
+    throw error;
   } finally {
     await collector.close();
   }
@@ -1267,6 +1347,7 @@ const collectCommand = program
       }
       options.headless = false;
       options.interactiveAuthHandler = createInteractiveAuthHandler(options);
+      options.interactiveExploreHandler = createInteractiveExplorationHandler();
       log('[*] --interactive-auth enabled a visible browser and a clean post-login collection phase', options.silent);
     }
     if (urls.length > 1 && options.aiReport) {
@@ -1496,6 +1577,7 @@ module.exports = {
   captureAuthState,
   createCollectorOptions,
   saveContextStorageState,
+  savePartialCollection,
   validateInteractiveAuth,
   filterUrls,
   handleMultiOutput,

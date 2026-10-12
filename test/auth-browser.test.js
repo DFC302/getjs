@@ -13,11 +13,16 @@ function listen(handler) {
 }
 
 function close(server) {
+  server.closeAllConnections?.();
   return new Promise(resolve => server.close(resolve));
 }
 
 test('interactive authentication keeps the live browser session and excludes pre-login scripts', { timeout: 30000 }, async () => {
   const requestedPaths = [];
+  const external = await listen((request, response) => {
+    response.setHeader('content-type', 'text/html');
+    response.end('<!doctype html><title>external destination</title>');
+  });
   const target = await listen((request, response) => {
     const pathname = new URL(request.url, 'http://fixture.test').pathname;
     requestedPaths.push(pathname);
@@ -44,12 +49,17 @@ test('interactive authentication keeps the live browser session and excludes pre
         <script>fetch('/api/private?view=calendar')</script>`);
       return;
     }
+    if (pathname === '/manual') {
+      response.setHeader('content-type', 'text/html');
+      response.end('<!doctype html><script src="/manual-only.js"></script>');
+      return;
+    }
     if (pathname === '/api/private') {
       response.setHeader('content-type', 'application/json');
       response.end(authenticated ? '{"ok":true}' : '{"ok":false}');
       return;
     }
-    if (['/login-only.js', '/public-only.js', '/private-app.js'].includes(pathname)) {
+    if (['/login-only.js', '/public-only.js', '/private-app.js', '/manual-only.js'].includes(pathname)) {
       response.setHeader('content-type', 'application/javascript');
       response.end(`window.loaded = ${JSON.stringify(pathname)};`);
       return;
@@ -82,6 +92,10 @@ test('interactive authentication keeps the live browser session and excludes pre
         validation: { performed: true, passed: true, status: 200 },
       };
     },
+    interactiveExploreHandler: async ({ page }) => {
+      await page.goto(`${targetUrl}/manual`);
+      await page.goto(`http://127.0.0.1:${external.address().port}/outside`);
+    },
   });
 
   try {
@@ -90,6 +104,7 @@ test('interactive authentication keeps the live browser session and excludes pre
     assert.equal(collector.page, handlerPage);
     assert.equal(await collector.page.evaluate(() => sessionStorage.getItem('login-flow-state')), 'preserved');
     assert.equal(paths.has('/private-app.js'), true);
+    assert.equal(paths.has('/manual-only.js'), true);
     assert.equal(paths.has('/login-only.js'), false);
     assert.equal(paths.has('/public-only.js'), false);
 
@@ -98,6 +113,8 @@ test('interactive authentication keeps the live browser session and excludes pre
     assert.equal(metadata.authentication.confirmed_url, `${targetUrl}/app`);
     assert.equal(metadata.authentication.saved_storage_state, '/tmp/fixture-state.json');
     assert.equal(metadata.authentication.validation.passed, true);
+    assert.equal(metadata.authentication.exploration.recovered_target_page, true);
+    assert.ok(metadata.authentication.exploration.javascript_observed >= 2);
     assert.ok(metadata.authentication.pre_auth.javascript_observed >= 1);
 
     const inventory = collector.getAPIInventory().toJSON(metadata.coverage);
@@ -110,7 +127,21 @@ test('interactive authentication keeps the live browser session and excludes pre
   } finally {
     await collector.close();
     await close(target);
+    await close(external);
   }
+});
+
+test('navigation classification tolerates requests whose frame is not created yet', () => {
+  const collector = new JSCollector();
+  const earlyNavigation = {
+    isNavigationRequest: () => true,
+    frame: () => { throw new Error('Frame for this navigation request is not available'); },
+  };
+  assert.equal(collector.isTopLevelNavigationRequest(earlyNavigation), false);
+  assert.equal(collector.isTopLevelNavigationRequest({
+    isNavigationRequest: () => true,
+    frame: () => ({ parentFrame: () => null }),
+  }), true);
 });
 
 test('custom headers and localStorage stay on allowed domains', { timeout: 30000 }, async () => {

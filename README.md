@@ -46,7 +46,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 - **Headless Toggle** - Run with visible browser for debugging
 - **Secret Scanning Pipeline** - Discover, download, and scan JavaScript with TruffleHog in one command
 - **Unredacted Evidence Reports** - Preserves complete findings in mode-`0600` JSON reports for validation
-- **Managed TruffleHog** - Installs and explicitly updates checksum-validated official releases
+- **Managed TruffleHog** - Automatically installs the latest checksum-validated official release with getjs
 - **Two AI Tasks** - Choose a compact endpoint inventory or the complete client-side security review
 - **AI Endpoint Reconstruction** - Correlates URLs, methods, parameters, bodies, headers, authentication clues, GraphQL, and realtime channels without producing the full security report
 - **Full AI Security Analysis** - Produces strict JSON plus readable Markdown covering endpoints, secrets, DOM sinks, `postMessage`, auth flows, client-side vulnerabilities, and prioritized follow-up checks
@@ -60,7 +60,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
 
 - **Node.js 18+** - Required for Playwright compatibility
 - **npm** - Comes with Node.js
-- **tar** - Used only for managed TruffleHog installation (normally preinstalled on Linux/macOS and modern Windows)
+- **tar** - Used to install managed TruffleHog (normally preinstalled on Linux/macOS and modern Windows)
 - **Codex CLI or Claude Code CLI** - Optional; required only for `--ai`. Install and authenticate the provider separately before use.
 
 Check your Node.js version:
@@ -79,18 +79,15 @@ npm install -g github:DFC302/getjs
 # Install Chromium browser (required, one-time setup)
 npx playwright install chromium
 
-# Install managed TruffleHog (required only for --scan-secrets)
-getjs scanner install
-
 # Verify both components
 getjs --version
-getjs scanner status --check-updates
+getjs scanner status
 
 # Optional: verify an installed AI provider and inspect active settings
 getjs ai status --provider codex
 ```
 
-TruffleHog is not downloaded silently during a normal getjs installation or collection. This keeps installation predictable for offline and restricted systems. To install it as part of the first scanning pipeline instead, omit `getjs scanner install` and use `--install-scanner` with `--scan-secrets`.
+The npm installation automatically downloads the latest official TruffleHog release, validates its published SHA-256 checksum, and installs it in getjs's user data directory. Set `GETJS_SKIP_TRUFFLEHOG_INSTALL=1` before the npm command only when an offline or restricted installation must skip this step; you can install it later with `getjs scanner install`.
 
 ### Option 2: Clone and Install Locally
 
@@ -129,14 +126,13 @@ npx playwright install chromium
 
 This only needs to be done once per system.
 
-Secret scanning additionally requires TruffleHog. Install it separately:
+TruffleHog is installed automatically by getjs's npm installation. Verify the managed scanner with:
 
 ```bash
-getjs scanner install
-getjs scanner status --check-updates
+getjs scanner status
 ```
 
-You can skip this separate step and add `--install-scanner` to the first `--scan-secrets` pipeline instead. Scanner updates remain explicit through `getjs scanner update` or the pipeline's `--update-scanner` flag.
+If installation scripts were disabled with npm's `--ignore-scripts` option, or `GETJS_SKIP_TRUFFLEHOG_INSTALL=1` was set, run `getjs scanner install` before using `--scan-secrets`. You can also add `--install-scanner` to the first scanning pipeline.
 
 ### Updating
 
@@ -144,7 +140,8 @@ You can skip this separate step and add `--install-scanner` to the first `--scan
 # Update getjs from the private GitHub repository
 npm install -g github:DFC302/getjs
 
-# Update the managed scanner to the latest official release
+# Updating getjs also checks and installs the latest managed scanner.
+# This command can update only the scanner between getjs releases:
 getjs scanner update
 
 # Confirm the active versions and query the official release feed
@@ -154,10 +151,18 @@ getjs scanner status --check-updates
 
 ### Troubleshooting
 
-**Permission errors on Linux/macOS:**
+**Permission errors during a global install on Linux/macOS:**
+
+Use a user-owned npm prefix so getjs and its managed TruffleHog binary are installed for the same account:
+
 ```bash
-sudo npm install -g github:DFC302/getjs
+mkdir -p "$HOME/.local"
+npm config set prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+npm install -g github:DFC302/getjs
 ```
+
+Add the `PATH` export to your shell profile to keep it across sessions. Avoid running the install with `sudo`, because the lifecycle hook would install the managed scanner for the root account rather than your normal user.
 
 **Missing dependencies on Linux (headless servers):**
 ```bash
@@ -292,8 +297,8 @@ getjs openapi \
   --input ./evidence/example-endpoints.json \
   --html ./evidence/example-swagger.html
 
-# Install TruffleHog automatically as part of the first pipeline run
-getjs -u https://example.com --scan-secrets --install-scanner -d ./js-files
+# TruffleHog was installed with getjs; collect, download, and scan
+getjs -u https://example.com --scan-secrets -d ./js-files
 
 # Authenticated discovery, download, and secret scan
 getjs -u https://example.com/dashboard \
@@ -660,7 +665,7 @@ getjs scanner status [--check-updates]
 getjs scanner update
 ```
 
-Managed binaries are stored under the user's data directory (`~/.local/share/getjs` on a typical Linux installation). Installation downloads an official TruffleHog release and validates the archive against its published SHA-256 checksum before replacing the managed binary. Updates are explicit so an engagement remains reproducible; `status --check-updates` reports whether a newer official release exists.
+Managed binaries are stored under the user's data directory (`~/.local/share/getjs` on a typical Linux installation). The npm installation downloads the latest official TruffleHog release and validates the archive against its published SHA-256 checksum before replacing the managed binary. Each later getjs installation checks for a newer release; between getjs installations, updates remain explicit through `scanner update` or a pipeline's `--update-scanner` flag. `status --check-updates` reports whether a newer official release exists.
 
 #### Multi-Domain Options
 
@@ -894,13 +899,13 @@ Recursive analysis can find plausible JavaScript references that the browser did
 ### Secret Scanning Pipeline
 
 ```bash
-# Existing TruffleHog installation or managed binary
+# The managed TruffleHog binary was installed automatically with getjs
 getjs -u https://target.com \
   --storage-state /tmp/target-state.json \
   --scan-secrets \
   --download-dir ./target-js
 
-# First run: install the managed scanner, then collect/download/scan
+# Recovery path when npm lifecycle scripts were deliberately skipped
 getjs -u https://target.com \
   --scan-secrets \
   --install-scanner \

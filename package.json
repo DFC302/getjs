@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node bin/getjs.js",
+    "postinstall": "node scripts/install-trufflehog.js",
     "test": "node --test"
   },
   "files": [
@@ -15,6 +16,7 @@
     "src/",
     "prompts/",
     "schemas/",
+    "scripts/",
     "config/",
     "README.md"
   ],

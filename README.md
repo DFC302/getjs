@@ -2,6 +2,17 @@
 
 A browser-backed JavaScript URL extractor for security researchers. It combines runtime network observation, DOM inspection, and bounded recursive bundle parsing to discover JavaScript used or referenced by web applications.
 
+## References
+
+- [TruffleHog documentation](https://github.com/trufflesecurity/trufflehog) and [official releases](https://github.com/trufflesecurity/trufflehog/releases)
+- [Playwright library documentation](https://playwright.dev/docs/library) and [browser installation](https://playwright.dev/docs/browsers)
+- [Commander.js documentation](https://github.com/tj/commander.js)
+- [`psl` Public Suffix List parser](https://github.com/lupomontero/psl)
+- [OpenAPI Specification 3.1.0](https://spec.openapis.org/oas/v3.1.0.html) and [Swagger UI documentation](https://swagger.io/docs/open-source-tools/swagger-ui/usage/installation/)
+- [npm lifecycle scripts](https://docs.npmjs.com/cli/using-npm/scripts/)
+- [Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli)
+- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
+
 ## Features
 
 - **Real Browser Execution** - Uses Playwright/Chromium to execute JavaScript exactly like a real browser
@@ -1214,17 +1225,6 @@ main().catch(console.error);
 - [x] ~~Session context, role-path flags, and safe authorization differential checks~~ ✅ Implemented
 - [ ] HAR file export
 - [ ] Integration with waybackurls for historical JS discovery
-
-## References
-
-- [TruffleHog documentation](https://github.com/trufflesecurity/trufflehog) and [official releases](https://github.com/trufflesecurity/trufflehog/releases)
-- [Playwright library documentation](https://playwright.dev/docs/library) and [browser installation](https://playwright.dev/docs/browsers)
-- [Commander.js documentation](https://github.com/tj/commander.js)
-- [`psl` Public Suffix List parser](https://github.com/lupomontero/psl)
-- [OpenAPI Specification 3.1.0](https://spec.openapis.org/oas/v3.1.0.html) and [Swagger UI documentation](https://swagger.io/docs/open-source-tools/swagger-ui/usage/installation/)
-- [npm lifecycle scripts](https://docs.npmjs.com/cli/using-npm/scripts/)
-- [Codex CLI documentation](https://learn.chatgpt.com/docs/codex/cli)
-- [Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)
 
 ## License
 

@@ -42,6 +42,11 @@ function parseInteger(value, optionName, minimum) {
 
 const parsePositiveInteger = (optionName) => (value) => parseInteger(value, optionName, 1);
 const parseNonNegativeInteger = (optionName) => (value) => parseInteger(value, optionName, 0);
+const parseHttpStatus = value => {
+  const status = parseInteger(value, 'auth-check-status', 100);
+  if (status > 599) throw new InvalidArgumentError('auth-check-status must be between 100 and 599');
+  return status;
+};
 
 // Banner
 const banner = `
@@ -248,6 +253,140 @@ async function captureAuthState(options) {
   }
 }
 
+function looksLikeAuthenticationUrl(value) {
+  try {
+    return /(?:^|[./_-])(login|log-in|signin|sign-in|auth|oauth|sso|okta)(?:[./?&_-]|$)/i.test(new URL(value).href);
+  } catch {
+    return false;
+  }
+}
+
+function selectTargetOriginPage(context, targetUrl, fallbackPage) {
+  const origin = new URL(targetUrl).origin;
+  const pages = context.pages().filter(page => !page.isClosed());
+  const matchingPage = [...pages].reverse().find(page => {
+    try { return new URL(page.url()).origin === origin; } catch { return false; }
+  });
+  if (matchingPage) return matchingPage;
+  if (!fallbackPage || fallbackPage.isClosed()) return null;
+  try {
+    return new URL(fallbackPage.url()).origin === origin ? fallbackPage : null;
+  } catch {
+    return null;
+  }
+}
+
+async function validateInteractiveAuth(context, collector, targetUrl, options) {
+  const requested = options.authCheckUrl || options.authCheckMatch
+    || options.authCheckNotMatch || options.authCheckStatus !== undefined;
+  if (!requested) return { performed: false, passed: null };
+
+  const checkUrl = new URL(options.authCheckUrl || targetUrl, targetUrl);
+  if (checkUrl.origin !== new URL(targetUrl).origin) {
+    throw new Error('--auth-check-url must be on the target origin');
+  }
+  let response;
+  try {
+    response = await context.request.get(checkUrl.href, {
+      headers: collector.headersForUrl(checkUrl.href),
+      timeout: options.timeout * 1000,
+      failOnStatusCode: false,
+    });
+    const status = response.status();
+    const finalUrl = response.url();
+    const body = (options.authCheckMatch || options.authCheckNotMatch)
+      ? await response.text()
+      : '';
+    const failures = [];
+    if (options.authCheckStatus !== undefined && status !== options.authCheckStatus) {
+      failures.push(`expected HTTP ${options.authCheckStatus}, received ${status}`);
+    } else if (options.authCheckStatus === undefined && (status < 200 || status >= 400)) {
+      failures.push(`received HTTP ${status}`);
+    }
+    if (looksLikeAuthenticationUrl(finalUrl)) failures.push(`redirected to authentication-looking URL ${finalUrl}`);
+    if (options.authCheckMatch && !body.includes(options.authCheckMatch)) {
+      failures.push('required authentication marker was not found');
+    }
+    if (options.authCheckNotMatch && body.includes(options.authCheckNotMatch)) {
+      failures.push('forbidden unauthenticated marker was found');
+    }
+    if (failures.length > 0) throw new Error(`Interactive authentication check failed: ${failures.join('; ')}`);
+    return {
+      performed: true,
+      passed: true,
+      url: checkUrl.href,
+      final_url: finalUrl,
+      status,
+      match_checked: Boolean(options.authCheckMatch),
+      not_match_checked: Boolean(options.authCheckNotMatch),
+    };
+  } finally {
+    if (response) await response.dispose().catch(() => {});
+  }
+}
+
+async function saveContextStorageState(context, outputPath, force = false) {
+  const resolved = path.resolve(outputPath);
+  if (fs.existsSync(resolved) && !force) {
+    throw new Error(`Storage-state file already exists: ${resolved} (use --force-auth-state to overwrite)`);
+  }
+  ensureParentDirectory(resolved);
+  const temporary = `${resolved}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    await context.storageState({ path: temporary });
+    fs.chmodSync(temporary, 0o600);
+    if (force) {
+      fs.renameSync(temporary, resolved);
+    } else {
+      try {
+        fs.linkSync(temporary, resolved);
+      } catch (error) {
+        if (error.code === 'EEXIST') {
+          throw new Error(`Storage-state file already exists: ${resolved} (use --force-auth-state to overwrite)`);
+        }
+        throw error;
+      }
+      fs.unlinkSync(temporary);
+    }
+    fs.chmodSync(resolved, 0o600);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+  return resolved;
+}
+
+function createInteractiveAuthHandler(options) {
+  return async ({ page, context, loginUrl, targetUrl, collector }) => {
+    console.error(`[*] Interactive authentication page: ${loginUrl}`);
+    console.error('[*] Complete login, MFA, SSO, and consent in the browser.');
+    console.error('[*] Stop on an authenticated application page, keep the browser open, then return here.');
+    const prompt = readline.createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      await prompt.question('Press Enter when authentication is complete... ');
+    } finally {
+      prompt.close();
+    }
+
+    const authenticatedPage = selectTargetOriginPage(context, targetUrl, page);
+    if (!authenticatedPage || authenticatedPage.isClosed()) {
+      throw new Error('No target-origin application page was open after authentication; finish the login redirect before pressing Enter');
+    }
+    const confirmedUrl = authenticatedPage.url();
+    if (looksLikeAuthenticationUrl(confirmedUrl) && !options.authCheckUrl) {
+      console.error(`[!] Warning: the confirmed page still looks like an authentication page: ${confirmedUrl}`);
+    }
+    const validation = await validateInteractiveAuth(context, collector, targetUrl, options);
+    let savedStorageState = null;
+    if (options.saveStorageState) {
+      savedStorageState = await saveContextStorageState(context, options.saveStorageState, options.forceAuthState);
+      console.error(`[*] Authenticated storage state saved to ${savedStorageState} (mode 0600)`);
+    }
+    const cookies = await context.cookies(targetUrl);
+    console.error(`[*] Authentication confirmed; starting clean collection with ${cookies.length} target cookie(s).`);
+    return { page: authenticatedPage, savedStorageState, validation };
+  };
+}
+
 function inferredAIScope(targetUrl) {
   try {
     const hostname = new URL(targetUrl).hostname;
@@ -330,6 +469,9 @@ function createCollectorOptions(targetUrl, options, browser = null) {
     sessionIdentity: options.sessionIdentity,
     sessionRole: options.sessionRole,
     sessionLabel: options.sessionLabel,
+    interactiveAuth: options.interactiveAuth,
+    loginUrl: options.loginUrl,
+    interactiveAuthHandler: options.interactiveAuthHandler,
     browser,
   };
 }
@@ -908,6 +1050,14 @@ const collectCommand = program
   .option('-x, --proxy <url>', 'Proxy server URL (e.g., http://127.0.0.1:8080)')
   .option('-c, --cookies <file|string>', 'Cookie file (JSON) or raw cookie string (e.g., "name=val; name2=val2")')
   .option('--storage-state <file>', 'Playwright storage-state JSON with cookies and localStorage')
+  .option('--interactive-auth', 'Pause in a visible browser for manual login, then collect with that live session')
+  .option('--login-url <url>', 'Login page to open before interactive authenticated collection (default: target)')
+  .option('--save-storage-state <file>', 'Save the confirmed interactive session for later reuse')
+  .option('--force-auth-state', 'Overwrite an existing --save-storage-state file')
+  .option('--auth-check-url <url>', 'Same-origin URL to request after interactive login')
+  .option('--auth-check-status <code>', 'Required HTTP status for the authentication check', parseHttpStatus)
+  .option('--auth-check-match <text>', 'Require the authentication-check response to contain this text')
+  .option('--auth-check-not-match <text>', 'Reject the authentication-check response if it contains this text')
   .option('--cookie-domain <domain>', 'Domain assigned to raw cookie strings (default: target host)')
   .option('-H, --header <header...>', 'Extra HTTP header (format: "Name: Value")')
   .option('--local-storage <entry...>', 'Set localStorage entry (format: "key=value")')
@@ -962,6 +1112,7 @@ const collectCommand = program
       + '  getjs -u https://example.com --fetch-all --scan-secrets --install-scanner\n'
       + '\nAuthentication capture:\n'
       + '  getjs auth -u <url> -o <storage-state.json>\n'
+      + '  getjs -u <url> --interactive-auth --save-storage-state <storage-state.json> --fetch-all\n'
       + '\nScanner management:\n'
       + '  getjs scanner <install|status|update>\n'
       + '\nAI analysis:\n'
@@ -977,6 +1128,30 @@ const collectCommand = program
 
     if (options.cookies && options.storageState) {
       throw new Error('Use either --cookies or --storage-state, not both');
+    }
+    const interactiveOnlyOptions = [
+      options.loginUrl,
+      options.saveStorageState,
+      options.forceAuthState,
+      options.authCheckUrl,
+      options.authCheckStatus,
+      options.authCheckMatch,
+      options.authCheckNotMatch,
+    ];
+    if (!options.interactiveAuth && interactiveOnlyOptions.some(value => value !== undefined)) {
+      throw new Error('Interactive authentication options require --interactive-auth');
+    }
+    if (options.forceAuthState && !options.saveStorageState) {
+      throw new Error('--force-auth-state requires --save-storage-state');
+    }
+    if (options.interactiveAuth && (!process.stdin.isTTY || !process.stderr.isTTY)) {
+      throw new Error('--interactive-auth requires an interactive terminal');
+    }
+    if (options.interactiveAuth && options.saveStorageState) {
+      const statePath = path.resolve(options.saveStorageState);
+      if (fs.existsSync(statePath) && !options.forceAuthState) {
+        throw new Error(`Storage-state file already exists: ${statePath} (use --force-auth-state to overwrite)`);
+      }
     }
     if (options.fetchAll && options.fetchOne) {
       throw new Error('Use either --fetch-all or --fetch-one, not both');
@@ -1077,6 +1252,22 @@ const collectCommand = program
 
     if (urls.length === 0) {
       throw new Error('Provide URLs via -u, -f, or stdin pipe');
+    }
+    if (options.interactiveAuth && urls.length !== 1) {
+      throw new Error('--interactive-auth requires exactly one target URL');
+    }
+    if (options.interactiveAuth) {
+      const targetUrl = validateUrl(urls[0]);
+      if (options.loginUrl) options.loginUrl = validateUrl(new URL(options.loginUrl, targetUrl).href);
+      if (options.authCheckUrl) {
+        options.authCheckUrl = validateUrl(new URL(options.authCheckUrl, targetUrl).href);
+        if (new URL(options.authCheckUrl).origin !== new URL(targetUrl).origin) {
+          throw new Error('--auth-check-url must be on the target origin');
+        }
+      }
+      options.headless = false;
+      options.interactiveAuthHandler = createInteractiveAuthHandler(options);
+      log('[*] --interactive-auth enabled a visible browser and a clean post-login collection phase', options.silent);
     }
     if (urls.length > 1 && options.aiReport) {
       throw new Error('--ai-report is only valid for a single target; use --ai-report-dir for multiple targets');
@@ -1304,6 +1495,8 @@ if (require.main === module) {
 module.exports = {
   captureAuthState,
   createCollectorOptions,
+  saveContextStorageState,
+  validateInteractiveAuth,
   filterUrls,
   handleMultiOutput,
   matchDomainPattern,

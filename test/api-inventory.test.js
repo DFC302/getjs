@@ -65,6 +65,20 @@ test('API inventory deduplicates endpoints, records auth context, and flags role
   assert.equal(JSON.stringify(report).includes('Bearer secret'), false);
 });
 
+test('API inventory can start a clean authenticated observation phase', () => {
+  const inventory = new APIInventory('https://app.example.test/');
+  inventory.add({ url: 'https://app.example.test/api/pre-login', method: 'GET' });
+  inventory.clearObservations();
+  inventory.setAuthContext({ authenticated: true, role: 'candidate', label: 'candidate-session' });
+  inventory.add({ url: 'https://app.example.test/api/private', method: 'GET' });
+
+  const report = inventory.toJSON();
+  assert.equal(report.summary.observations, 1);
+  assert.equal(new URL(report.observations[0].url).pathname, '/api/private');
+  assert.equal(report.observations[0].auth_context.authenticated, true);
+  assert.equal(report.observations[0].auth_context.role, 'candidate');
+});
+
 test('HAR and Burp importers parse requests while inventory enforces target origin', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-import-'));
   const harPath = path.join(directory, 'traffic.har');

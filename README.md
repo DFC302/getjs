@@ -30,7 +30,8 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
   - Browser cookie exports, Netscape cookie jars, or raw cookie strings
   - Playwright storage-state files containing cookies and per-origin localStorage
   - Origin-scoped custom HTTP headers and localStorage values
-- **Interactive Auth Capture** - Log in through a headed browser and save a mode-`0600` storage-state file with `getjs auth`
+- **Integrated Interactive Authentication** - Log in through a headed browser, preserve the live session, discard pre-login collection noise, and scan the authenticated application page
+- **Reusable Auth Capture** - Save a mode-`0600` storage-state file with either `getjs auth` or the integrated collection workflow
 - **Auth-Aware Downloads** - Downloaded JS files carry browser session cookies/headers
 - **Safe Downloads** - Enforces size limits, rejects HTML responses, follows bounded redirects, scopes credentials per redirect, and uses collision-safe filenames
 - **Navigation Diagnostics** - Reports final URLs, redirect chains, failed requests, and authentication-related redirects in JSON output
@@ -346,7 +347,7 @@ cat urls.txt | getjs [options]
 | `--max-depth <n>` | Maximum recursive import depth | 3 |
 | `--max-files <n>` | Maximum recursively parsed scripts | 500 |
 | `--max-file-size <mb>` | Maximum parsed/downloaded script size | 10 |
-| `--crawl` | Visit the same-origin `/admin` entry point and safe discovered GET links | - |
+| `--crawl` | Visit safe discovered same-origin GET links | - |
 | `--max-pages <n>` | Maximum additional pages for `--crawl` | 10 |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
@@ -357,6 +358,14 @@ cat urls.txt | getjs [options]
 |--------|-------------|---------|
 | `-c, --cookies <file\|string>` | Cookie file (JSON) or raw cookie string | - |
 | `--storage-state <file>` | Playwright storage state with cookies/localStorage | - |
+| `--interactive-auth` | Open a visible browser, pause for login, then collect using that live session | - |
+| `--login-url <url>` | Login URL to open; relative URLs resolve against the target | Target URL |
+| `--save-storage-state <file>` | Save the confirmed session for later runs (mode `0600`) | - |
+| `--force-auth-state` | Overwrite an existing saved state file | - |
+| `--auth-check-url <url>` | Same-origin URL requested after login to validate the session | - |
+| `--auth-check-status <code>` | Required status from the authentication check | Any 2xx/3xx |
+| `--auth-check-match <text>` | Required literal response marker from the authentication check | - |
+| `--auth-check-not-match <text>` | Literal unauthenticated marker that causes validation to fail | - |
 | `--cookie-domain <domain>` | Domain assigned to raw cookies | Target host |
 | `-H, --header <header...>` | Extra HTTP headers | - |
 | `--local-storage <entry...>` | Set localStorage entries | - |
@@ -367,6 +376,35 @@ cat urls.txt | getjs [options]
 
 Identity and role values are analyst-supplied context. getjs records them but
 does not independently prove which account or role the server assigned.
+
+For a login that may involve passwords, MFA, SSO, consent, or CAPTCHA, use the
+integrated workflow:
+
+```bash
+getjs -u https://apply.example.com/ \
+  --interactive-auth \
+  --login-url /login \
+  --save-storage-state ./candidate.storage-state.json \
+  --session-label candidate \
+  --session-role candidate \
+  --crawl \
+  --api-inventory ./candidate-api.json \
+  --fetch-all \
+  --download-dir ./candidate-js
+```
+
+getjs opens the login URL in a visible browser. Complete the entire login and
+leave a page on the target origin open, then press Enter in the terminal. It
+keeps that exact browser context and tab (including in-memory `sessionStorage`),
+removes login-phase scripts and traffic from the results, and reloads the
+confirmed authenticated page as the first collection page. The target origin
+continues to define API scope. An optional authentication check can prevent a
+mistaken confirmation from starting collection.
+
+`--interactive-auth` accepts exactly one target and requires a terminal. A
+saved Playwright storage-state file contains cookies and localStorage but not
+sessionStorage; the current integrated run still retains sessionStorage because
+it does not replace the live context. Treat saved state as a credential.
 
 #### Entry Points, API Inventory, and Imports
 
@@ -1030,7 +1068,7 @@ main().catch(console.error);
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                         getjs v2.8                          │
+│                         getjs v2.9                          │
 ├─────────────────────────────────────────────────────────────┤
 │  CLI (bin/getjs.js)                                         │
 │  ├── Interactive authenticated-state capture                │

@@ -87,6 +87,9 @@ class JSCollector {
       sessionRole: options.sessionRole || null,
       sessionLabel: options.sessionLabel || null,
       maxInlineArtifactSize: options.maxInlineArtifactSize ?? 1024 * 1024,
+      interactiveAuth: options.interactiveAuth === true,
+      loginUrl: options.loginUrl || null,
+      interactiveAuthHandler: options.interactiveAuthHandler || null,
     };
 
     this.jsUrls = new Set();
@@ -121,6 +124,7 @@ class JSCollector {
       redirects: [],
       failedRequests: [],
       warnings: [],
+      authentication: null,
     };
   }
 
@@ -923,6 +927,94 @@ class JSCollector {
     }
   }
 
+  clearCollectedEvidence() {
+    this.jsUrls = new Set();
+    this.wsJsUrls = new Set();
+    this.swScripts = new Set();
+    this.sourceMapUrls = new Set();
+    this.sourceMapAttempts = new Set();
+    this.importMap = { imports: {} };
+    this.inlineArtifacts = [];
+    this.inlineArtifactHashes = new Set();
+    this.inlineArtifactsSkipped = 0;
+    this.pageCoverage = { planned: [], visited: [], failed: [] };
+    this.apiInventory?.clearObservations();
+    this.metadata.redirects = [];
+    this.metadata.failedRequests = [];
+    this.metadata.warnings = [];
+  }
+
+  selectAuthenticatedPage(preferredPage = null) {
+    const targetOrigin = new URL(this.targetUrl).origin;
+    if (preferredPage && !preferredPage.isClosed()) {
+      try {
+        if (new URL(preferredPage.url()).origin === targetOrigin) return preferredPage;
+      } catch {}
+    }
+    const pages = this.context.pages().filter(page => !page.isClosed());
+    return [...pages].reverse().find(page => {
+      try { return new URL(page.url()).origin === targetOrigin; } catch { return false; }
+    }) || null;
+  }
+
+  async performInteractiveAuthentication(targetUrl) {
+    if (typeof this.options.interactiveAuthHandler !== 'function') {
+      throw new Error('Interactive authentication requires an interactiveAuthHandler');
+    }
+    const loginUrl = this.normalizeUrl(this.options.loginUrl || targetUrl, targetUrl);
+    if (!loginUrl || !/^https?:/i.test(loginUrl)) throw new Error(`Invalid interactive login URL: ${this.options.loginUrl}`);
+
+    this.log(`Opening interactive login page: ${loginUrl}`);
+    try {
+      await this.page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: this.options.timeout });
+    } catch (error) {
+      if (!this.page.url() || this.page.url() === 'about:blank') throw error;
+      this.log(`Login navigation did not fully complete: ${error.message}`);
+    }
+    const outcome = await this.options.interactiveAuthHandler({
+      page: this.page,
+      context: this.context,
+      loginUrl,
+      targetUrl,
+      collector: this,
+    }) || {};
+    await this.waitForPendingTasks();
+
+    const authenticatedPage = this.selectAuthenticatedPage(outcome.page);
+    if (!authenticatedPage) {
+      throw new Error('No target-origin application page remained open after interactive authentication');
+    }
+    const confirmedUrl = authenticatedPage.url();
+    const preAuth = {
+      javascript_observed: this.jsUrls.size,
+      api_observations: this.apiInventory?.observations.length || 0,
+      redirects: [...this.metadata.redirects],
+    };
+    for (const page of this.context.pages()) {
+      if (page !== authenticatedPage && !page.isClosed()) await page.close().catch(() => {});
+    }
+    this.page = authenticatedPage;
+    this.page.setDefaultTimeout(this.options.timeout);
+    this.clearCollectedEvidence();
+    this.pageCoverage.planned.push(confirmedUrl);
+    this.apiInventory?.setAuthContext({
+      authenticated: true,
+      identity: this.options.sessionIdentity,
+      role: this.options.sessionRole,
+      label: this.options.sessionLabel || 'interactive-authenticated',
+    });
+    this.metadata.authentication = {
+      mode: 'interactive',
+      login_url: loginUrl,
+      confirmed_url: confirmedUrl,
+      confirmed_at: new Date().toISOString(),
+      saved_storage_state: outcome.savedStorageState || null,
+      validation: outcome.validation || { performed: false, passed: null },
+      pre_auth: preAuth,
+    };
+    return confirmedUrl;
+  }
+
   async extractInlineModules(targetUrl, page = this.page) {
     this.log('Extracting module imports from inline scripts...');
 
@@ -1124,9 +1216,8 @@ class JSCollector {
         throw new Error(`Entrypoint must be a safe same-origin URL: ${entrypoint || '(invalid)'}`);
       }
     }
-    const commonEntrypoints = this.options.crawlLinks ? ['/admin'].map(route => this.normalizeUrl(route, allowedOrigin)) : [];
     const discoveredLinks = this.options.crawlLinks ? await this.extractCrawlLinks(this.page, allowedOrigin) : [];
-    const queue = [...explicitEntrypoints, ...commonEntrypoints, ...discoveredLinks]
+    const queue = [...explicitEntrypoints, ...discoveredLinks]
       .filter(url => !visited.has(url));
 
     this.pageCoverage.planned.push(...queue.filter(url => !this.pageCoverage.planned.includes(url)));
@@ -1182,14 +1273,18 @@ class JSCollector {
     await this.init(this.options.browser || null, targetUrl);
     await this.setupInterceptors(targetUrl);
 
-    this.log('Navigating to target...');
+    const collectionUrl = this.options.interactiveAuth
+      ? await this.performInteractiveAuthentication(targetUrl)
+      : targetUrl;
+
+    this.log(`Navigating to collection page: ${collectionUrl}`);
     try {
-      const response = await this.page.goto(targetUrl, {
+      const response = await this.page.goto(collectionUrl, {
         waitUntil: 'domcontentloaded',
         timeout: this.options.timeout,
       });
       this.pageCoverage.visited.push({
-        requested_url: targetUrl,
+        requested_url: collectionUrl,
         final_url: this.page.url(),
         outcome: 'visited',
         status_code: response?.status() || null,
@@ -1202,7 +1297,7 @@ class JSCollector {
       const warning = `Navigation did not fully complete (${error.message}); continuing from ${currentUrl}`;
       this.metadata.warnings.push(warning);
       this.log(warning);
-      this.pageCoverage.failed.push({ url: targetUrl, error: error.message });
+      this.pageCoverage.failed.push({ url: collectionUrl, error: error.message });
     }
 
     await this.runCollectionStep('Initial load wait', () => this.page.waitForTimeout(2000));
@@ -1350,6 +1445,7 @@ class JSCollector {
       redirects: [],
       failedRequests: [],
       warnings: [],
+      authentication: null,
     };
   }
 }

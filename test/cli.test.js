@@ -40,6 +40,10 @@ test('default help is the collect help and includes version', () => {
   assert.match(defaultHelp.stdout, /--har <file\.\.\.>/);
   assert.match(defaultHelp.stdout, /--burp <file\.\.\.>/);
   assert.match(defaultHelp.stdout, /--session-role <value>/);
+  assert.match(defaultHelp.stdout, /--interactive-auth/);
+  assert.match(defaultHelp.stdout, /--login-url <url>/);
+  assert.match(defaultHelp.stdout, /--save-storage-state <file>/);
+  assert.match(defaultHelp.stdout, /--auth-check-url <url>/);
   assert.match(defaultHelp.stdout, /getjs ai <init\|status>/);
   assert.match(defaultHelp.stdout, /getjs openapi --input/);
 });
@@ -144,6 +148,57 @@ test('auth command documents secure interactive storage-state capture', () => {
   ]);
   assert.equal(nonInteractive.status, 1);
   assert.match(nonInteractive.stderr, /requires an interactive terminal/);
+});
+
+test('integrated interactive authentication requires a terminal and scopes its options', () => {
+  const nonInteractive = runCli([
+    '-u', 'https://example.com/',
+    '--interactive-auth',
+  ]);
+  assert.equal(nonInteractive.status, 1);
+  assert.match(nonInteractive.stderr, /requires an interactive terminal/);
+
+  const orphanedOption = runCli([
+    '-u', 'https://example.com/',
+    '--login-url', '/login',
+  ]);
+  assert.equal(orphanedOption.status, 1);
+  assert.match(orphanedOption.stderr, /require --interactive-auth/);
+
+  const invalidStatus = runCli([
+    '-u', 'https://example.com/',
+    '--interactive-auth',
+    '--auth-check-status', '700',
+  ]);
+  assert.equal(invalidStatus.status, 1);
+  assert.match(invalidStatus.stderr, /between 100 and 599/);
+
+  const forceWithoutOutput = runCli([
+    '-u', 'https://example.com/',
+    '--interactive-auth',
+    '--force-auth-state',
+  ]);
+  assert.equal(forceWithoutOutput.status, 1);
+  assert.match(forceWithoutOutput.stderr, /requires --save-storage-state/);
+});
+
+test('interactive storage-state saving is private and does not overwrite by default', async () => {
+  const { saveContextStorageState } = require('../bin/getjs');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'getjs-interactive-state-'));
+  const output = path.join(directory, 'nested', 'state.json');
+  const context = {
+    async storageState({ path: statePath }) {
+      fs.writeFileSync(statePath, '{"cookies":[{"name":"session"}]}');
+    },
+  };
+  try {
+    assert.equal(await saveContextStorageState(context, output), path.resolve(output));
+    assert.equal(fs.statSync(output).mode & 0o777, 0o600);
+    await assert.rejects(saveContextStorageState(context, output), /already exists/);
+    assert.equal(await saveContextStorageState(context, output, true), path.resolve(output));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('secret scanning and scanner management are exposed by the CLI', () => {

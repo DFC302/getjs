@@ -157,6 +157,22 @@ class APIInventory {
     } catch { return false; }
   }
 
+  setAuthContext(context = {}) {
+    this.authContext = {
+      authenticated: Boolean(context.authenticated),
+      identity: context.identity || null,
+      role: context.role || null,
+      label: context.label || (context.authenticated ? 'authenticated' : 'unauthenticated'),
+    };
+  }
+
+  clearObservations() {
+    this.observations = [];
+    this.imported = 0;
+    this.requestRecords = new WeakMap();
+    this.websockets = new Map();
+  }
+
   add(record) {
     if (!record?.url || !this.isSameOrigin(record.url)) return null;
     const headers = record.request_headers || {};

@@ -202,8 +202,8 @@ test('collector continues with active requests and recursively discovers depende
     assert.ok(metadata.redirects.some(url => url.endsWith('/app/index.html')));
     assert.ok(metadata.staticDiscovered >= 3);
     assert.ok(metadata.sourceMaps.some(url => new URL(url).pathname === '/app/main.js.map'));
-    assert.equal(metadata.pagesCrawled, 3);
-    assert.equal(fixture.requestedPaths.has('/admin'), true);
+    assert.equal(metadata.pagesCrawled, 2);
+    assert.equal(fixture.requestedPaths.has('/admin'), false);
     assert.equal(fixture.requestedPaths.has('/logout'), false);
     assert.equal(paths.has('/should-not-load.js'), false);
     assert.equal(paths.has('/app/data.json'), false);

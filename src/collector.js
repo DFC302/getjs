@@ -7,6 +7,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { version: packageVersion } = require('../package.json');
 const { APIInventory } = require('./api-inventory');
+const { fetchHistoricalJsUrls } = require('./wayback');
 
 function matchDomainPattern(hostname, pattern) {
   const normalizedHost = String(hostname || '').toLowerCase();
@@ -91,9 +92,17 @@ class JSCollector {
       loginUrl: options.loginUrl || null,
       interactiveAuthHandler: options.interactiveAuthHandler || null,
       interactiveExploreHandler: options.interactiveExploreHandler || null,
+      wayback: options.wayback && typeof options.wayback === 'object'
+        ? { ...options.wayback }
+        : null,
     };
 
+    // Optional concise phase reporter (CLI wires this to respect --silent).
+    // Separate from this.log(), which only speaks under --verbose.
+    this.progress = typeof options.progress === 'function' ? options.progress : () => {};
+
     this.jsUrls = new Set();
+    this.historicalJsUrls = new Set(); // Wayback Machine historical candidates
     this.wsJsUrls = new Set();  // WebSocket-discovered JS
     this.swScripts = new Set(); // Service Worker scripts
     this.sourceMapUrls = new Set(); // Valid source maps discovered from JavaScript bundles
@@ -126,6 +135,7 @@ class JSCollector {
       failedRequests: [],
       warnings: [],
       authentication: null,
+      historical: null,
     };
   }
 
@@ -971,6 +981,50 @@ class JSCollector {
     }
   }
 
+  /**
+   * Query the Wayback Machine for JavaScript URLs this target has served
+   * historically and merge them into the discovered set as candidates. These
+   * are not fetched or executed here; downloads and filters validate them
+   * downstream. Best-effort: failures are recorded as warnings, never thrown.
+   */
+  async collectHistorical(targetUrl) {
+    const config = this.options.wayback;
+    if (!config) return;
+
+    this.log('Querying Wayback Machine for historical JavaScript URLs...');
+    this.progress('Querying Wayback Machine for historical JavaScript (this can take a while)...');
+    const { urls, stats } = await fetchHistoricalJsUrls(targetUrl, config);
+
+    let added = 0;
+    for (const url of urls) {
+      const wasKnown = this.historicalJsUrls.has(url);
+      const alreadyLive = this.jsUrls.has(url);
+      const recorded = this.recordJsUrl(url, targetUrl, 'Wayback Machine', true);
+      if (!recorded) continue;
+      this.historicalJsUrls.add(recorded);
+      if (!wasKnown && !alreadyLive) added += 1;
+    }
+
+    this.metadata.historical = {
+      enabled: true,
+      source: stats.source,
+      query: stats.query,
+      discovered: urls.length,
+      added_candidates: added,
+      error: stats.error,
+    };
+
+    if (stats.error) {
+      const warning = `Wayback historical discovery failed: ${stats.error}`;
+      this.metadata.warnings.push(warning);
+      this.log(warning);
+      this.progress(`Wayback Machine lookup failed: ${stats.error}`);
+      return;
+    }
+    this.log(`Wayback Machine contributed ${added} new historical JavaScript candidate(s) (${urls.length} seen)`);
+    this.progress(`Wayback Machine — +${added} historical candidate(s) (${urls.length} archived URL(s) seen)`);
+  }
+
   clearCollectedEvidence() {
     this.jsUrls = new Set();
     this.wsJsUrls = new Set();
@@ -1385,6 +1439,7 @@ class JSCollector {
     if (this.options.interactiveAuth) {
       await this.performAuthenticatedExploration(collectionUrl);
     }
+    this.progress('Extracting scripts and triggering lazy-loaded content...');
     await this.runCollectionStep('DOM script extraction', () => this.extractDomScripts());
 
     if (this.options.scrolling) {
@@ -1408,9 +1463,17 @@ class JSCollector {
     this.log('Final wait for async operations...');
     await this.runCollectionStep('Final wait', () => this.page.waitForTimeout(this.options.waitTime));
     await this.waitForPendingTasks();
+    if (this.options.recursive) {
+      this.progress(`Parsing ${this.jsUrls.size} discovered script(s) for nested imports...`);
+    }
     await this.runCollectionStep('Recursive dependency parsing', () => this.crawlScriptDependencies());
     await this.waitForPendingTasks();
 
+    if (this.options.wayback) {
+      await this.runCollectionStep('Wayback historical discovery', () => this.collectHistorical(targetUrl));
+    }
+
+    this.progress(`Collection finished — ${this.jsUrls.size} JavaScript URL(s) discovered`);
     this.metadata.finalUrl = this.page.url();
     this.metadata.title = await this.page.title().catch(() => null);
 
@@ -1429,6 +1492,10 @@ class JSCollector {
     return Array.from(this.jsUrls).sort();
   }
 
+  getHistoricalUrls() {
+    return Array.from(this.historicalJsUrls).sort();
+  }
+
   getMetadata() {
     return {
       ...this.metadata,
@@ -1436,6 +1503,7 @@ class JSCollector {
       failedRequests: [...this.metadata.failedRequests],
       warnings: [...this.metadata.warnings],
       sourceMaps: [...this.sourceMapUrls].sort(),
+      historical: this.metadata.historical ? { ...this.metadata.historical } : null,
       coverage: {
         pages: {
           planned: this.pageCoverage.planned.length,
@@ -1447,6 +1515,7 @@ class JSCollector {
         },
         assets: {
           javascript_observed: this.jsUrls.size,
+          historical_candidates: this.historicalJsUrls.size,
           source_maps: this.sourceMapUrls.size,
           inline_artifacts: this.inlineArtifacts.length,
           inline_artifacts_skipped: this.inlineArtifactsSkipped,
@@ -1506,6 +1575,7 @@ class JSCollector {
 
     // Clear collected URLs
     this.jsUrls = new Set();
+    this.historicalJsUrls = new Set();
     this.wsJsUrls = new Set();
     this.swScripts = new Set();
     this.sourceMapUrls = new Set();
@@ -1530,6 +1600,7 @@ class JSCollector {
       failedRequests: [],
       warnings: [],
       authentication: null,
+      historical: null,
     };
   }
 }
@@ -1548,6 +1619,7 @@ class JSDownloader {
       ignoreHTTPSErrors: options.ignoreHTTPSErrors !== false,
     };
     this._context = options.context || null; // Playwright BrowserContext
+    this.progress = typeof options.progress === 'function' ? options.progress : () => {};
   }
 
   log(message) {
@@ -1753,6 +1825,18 @@ class JSDownloader {
       fs.mkdirSync(this.options.outputDir, { recursive: true });
     }
 
+    // Report progress at ~10 even milestones, but only when there is enough to
+    // download to be worth it, so small runs stay quiet.
+    const total = urls.length;
+    const reportEvery = total > 30 ? Math.min(Math.max(Math.ceil(total / 10), 25), 250) : 0;
+    let completed = 0;
+    const noteCompletion = () => {
+      completed += 1;
+      if (reportEvery && (completed % reportEvery === 0 || completed === total)) {
+        this.progress(`Downloaded ${completed}/${total} file(s)...`);
+      }
+    };
+
     let nextIndex = 0;
     const worker = async () => {
       while (true) {
@@ -1785,6 +1869,8 @@ class JSDownloader {
         } catch (error) {
           errors[index] = { url, error: error.message };
           this.log(`Failed to download ${url}: ${error.message}`);
+        } finally {
+          noteCompletion();
         }
       }
     };

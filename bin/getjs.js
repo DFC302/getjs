@@ -459,9 +459,10 @@ function filterUrls(jsUrls, options, targetUrl = options.url) {
   });
 }
 
-function createCollectorOptions(targetUrl, options, browser = null) {
+function createCollectorOptions(targetUrl, options, browser = null, progress = () => {}) {
   const cookieDomain = new URL(targetUrl).hostname;
   return {
+    progress,
     headless: options.headless,
     timeout: options.timeout * 1000,
     waitTime: options.wait * 1000,
@@ -492,6 +493,16 @@ function createCollectorOptions(targetUrl, options, browser = null) {
     loginUrl: options.loginUrl,
     interactiveAuthHandler: options.interactiveAuthHandler,
     interactiveExploreHandler: options.interactiveExploreHandler,
+    wayback: options.wayback
+      ? {
+        enabled: true,
+        includeSubdomains: Boolean(options.waybackDomain),
+        limit: options.waybackLimit,
+        from: options.waybackFrom,
+        to: options.waybackTo,
+        timeout: (options.waybackTimeout || 30) * 1000,
+      }
+      : null,
     browser,
   };
 }
@@ -633,8 +644,9 @@ function savePartialCollection(collector, options, targetUrl, collectionError) {
   };
 }
 
-function createDownloader(collector, options) {
+function createDownloader(collector, options, progress = () => {}) {
   return new JSDownloader({
+    progress,
     outputDir: options.downloadDir,
     verbose: options.verbose,
     context: collector.context,
@@ -645,9 +657,13 @@ function createDownloader(collector, options) {
   });
 }
 
-async function downloadForTarget(collector, urls, options, targetUrl) {
+async function downloadForTarget(collector, urls, options, targetUrl, progress = () => {}) {
   if (!options.fetchAll && !options.fetchOne) return { results: [], errors: [] };
-  const downloader = createDownloader(collector, options);
+  const downloader = createDownloader(collector, options, progress);
+
+  if (options.fetchAll && urls.length > 0) {
+    progress(`Downloading ${urls.length} JavaScript file(s) to ${options.downloadDir}...`);
+  }
 
   if (options.fetchOne) {
     if (filterUrls([options.fetchOne], options, targetUrl).length === 0) {
@@ -790,7 +806,12 @@ async function analyzeMultipleDownloads(allResults, options) {
 
 async function collectJS(options) {
   const targetUrl = validateUrl(options.url);
-  const collector = new JSCollector(createCollectorOptions(targetUrl, options));
+  const collector = new JSCollector(createCollectorOptions(
+    targetUrl,
+    options,
+    null,
+    message => log(`[*] ${message}`, options.silent),
+  ));
 
   try {
     log(`[*] Target: ${targetUrl}`, options.silent);
@@ -814,11 +835,22 @@ async function collectJS(options) {
       log(`[*] Found ${jsUrls.length} JavaScript files`, options.silent);
     }
 
+    const historical = collector.metadata.historical;
+    if (historical && !historical.error) {
+      log(`[*] Wayback Machine: ${historical.added_candidates} new historical JS candidate(s) (${historical.discovered} seen)`, options.silent);
+    }
+
     if (options.fetchOne && !filteredUrls.includes(options.fetchOne)) {
       log('[!] Warning: --fetch-one URL was not in the discovered list; attempting it anyway', options.silent);
     }
 
-    const downloads = await downloadForTarget(collector, filteredUrls, options, targetUrl);
+    const downloads = await downloadForTarget(
+      collector,
+      filteredUrls,
+      options,
+      targetUrl,
+      message => log(`[*] ${message}`, options.silent),
+    );
     const networkDownloadCount = downloads.results.length;
     const analysisArtifacts = materializeAnalysisArtifacts(collector, downloads, options, targetUrl);
     if (options.fetchAll || options.fetchOne) {
@@ -1126,6 +1158,12 @@ const collectCommand = program
   .option('--crawl', 'Visit safe same-origin GET links to discover route-specific scripts')
   .option('--max-pages <n>', 'Maximum additional pages visited with --crawl', parsePositiveInteger('max-pages'), 10)
   .option('--entrypoint <path...>', 'Explicit same-origin page entry points to visit (for example /app /dashboard)')
+  .option('--wayback', 'Discover historical JavaScript URLs from the Internet Archive (Wayback Machine CDX API)')
+  .option('--wayback-domain', 'Expand Wayback discovery to all subdomains of the target registrable domain')
+  .option('--wayback-limit <n>', 'Maximum Wayback CDX rows to request', parsePositiveInteger('wayback-limit'), 5000)
+  .option('--wayback-from <timestamp>', 'Earliest Wayback capture timestamp (YYYY[MM[DD...]])')
+  .option('--wayback-to <timestamp>', 'Latest Wayback capture timestamp (YYYY[MM[DD...]])')
+  .option('--wayback-timeout <seconds>', 'Wayback CDX request timeout in seconds', parsePositiveInteger('wayback-timeout'), 30)
   .option('-A, --user-agent <string>', 'Custom User-Agent string')
   .option('-x, --proxy <url>', 'Proxy server URL (e.g., http://127.0.0.1:8080)')
   .option('-c, --cookies <file|string>', 'Cookie file (JSON) or raw cookie string (e.g., "name=val; name2=val2")')
@@ -1200,6 +1238,9 @@ const collectCommand = program
       + '  getjs -u https://example.com --ai codex --ai-task endpoints\n'
       + '  getjs -u https://example.com --entrypoint /app --api-inventory --ai codex --ai-task endpoints\n'
       + '  getjs ai <init|status>\n'
+      + '\nHistorical discovery:\n'
+      + '  getjs -u https://example.com --wayback\n'
+      + '  getjs -u https://example.com --wayback --wayback-domain --fetch-all\n'
       + '\nOffline OpenAPI generation:\n'
       + '  getjs openapi --input getjs-ai-analysis.json',
   )
@@ -1235,6 +1276,19 @@ const collectCommand = program
     }
     if (options.fetchAll && options.fetchOne) {
       throw new Error('Use either --fetch-all or --fetch-one, not both');
+    }
+    const waybackOnlyOptions = [
+      options.waybackDomain,
+      options.waybackFrom,
+      options.waybackTo,
+    ];
+    if (!options.wayback && waybackOnlyOptions.some(Boolean)) {
+      throw new Error('Wayback options require --wayback');
+    }
+    for (const [name, value] of [['--wayback-from', options.waybackFrom], ['--wayback-to', options.waybackTo]]) {
+      if (value !== undefined && !/^\d{1,14}$/.test(value)) {
+        throw new Error(`${name} must be a Wayback timestamp of 1-14 digits (YYYY[MM[DD[hhmmss]]])`);
+      }
     }
     if (typeof options.apiInventory === 'string' && options.apiReportDir) {
       throw new Error('Use either a custom --api-inventory file or --api-report-dir, not both');

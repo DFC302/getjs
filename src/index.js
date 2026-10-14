@@ -43,11 +43,13 @@ const {
   writeAPIInventory,
 } = require('./api-inventory');
 const { runAuthDiff } = require('./auth-diff');
+const { fetchHistoricalJsUrls } = require('./wayback');
 
 module.exports = {
   JSCollector,
   JSDownloader,
   APIInventory,
+  fetchHistoricalJsUrls,
   analyzeDownloadedFiles,
   createDefaultAIConfig,
   getAIStatus,

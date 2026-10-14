@@ -40,6 +40,7 @@ A browser-backed JavaScript URL extractor for security researchers. It combines 
   - **WebSocket messages** (monitors for JS URLs in WS traffic)
   - **Service Workers** (detects SW registrations and scripts)
 - **Recursive Dependency Parsing** - Follows static imports, dynamic string imports, workers, and JavaScript URL literals with depth/file/size limits
+- **Historical JS Discovery** - Optionally queries the Internet Archive Wayback Machine (the same CDX index `waybackurls`/`gau` read) for JavaScript URLs a target has ever served, merging them as candidates alongside live discovery
 - **Optional Route Crawling** - Visits bounded, same-origin GET links while avoiding common logout and destructive routes
 - **Explicit Entry Points** - Visits one or more known application routes such as `/app` even when public navigation does not link to them
 - **Passive API Inventory** - Records all same-origin XHR, fetch, SSE, and WebSocket connections observed by the browser regardless of response content type
@@ -237,6 +238,7 @@ Most uses fit one of these commands:
 | Download the JavaScript | `getjs -u https://example.com --fetch-all -d ./js` |
 | Build an AI endpoint inventory | `getjs -u https://example.com --ai --ai-task endpoints -d ./js` |
 | Include a hidden application route | `getjs -u https://example.com --entrypoint /app --api-inventory` |
+| Add historical JS from the Wayback Machine | `getjs -u https://example.com --wayback` |
 | Import proxy/browser history | `getjs -u https://example.com --har traffic.har --burp burp-history.xml --api-inventory` |
 | Run the complete AI security review | `getjs -u https://example.com --ai --ai-task full -d ./js` |
 | Compare safe requests across sessions | `getjs auth-diff -u https://example.com -i ./js/getjs-api-inventory.json --candidate-storage-state candidate.json` |
@@ -290,6 +292,9 @@ cat targets.txt | getjs --output-dir ./results
 
 # Download all discovered JS files
 getjs -u https://example.com --fetch-all -d ./js-files
+
+# Add historical JavaScript URLs from the Wayback Machine
+getjs -u https://example.com --wayback
 
 # Discover, download, and scan all JS in one pipeline
 getjs -u https://example.com --scan-secrets -d ./js-files
@@ -380,6 +385,22 @@ cat urls.txt | getjs [options]
 | `--max-pages <n>` | Maximum additional pages for `--crawl` | 10 |
 | `-A, --user-agent <string>` | Custom User-Agent | - |
 | `-x, --proxy <url>` | Proxy server URL | - |
+
+#### Historical Discovery Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--wayback` | Discover historical JS URLs from the Internet Archive (Wayback Machine CDX API) | - |
+| `--wayback-domain` | Expand discovery to all subdomains of the target registrable domain | Exact host only |
+| `--wayback-limit <n>` | Maximum Wayback CDX rows to request | 5000 |
+| `--wayback-from <timestamp>` | Earliest Wayback capture (`YYYY[MM[DD[hhmmss]]]`) | - |
+| `--wayback-to <timestamp>` | Latest Wayback capture (`YYYY[MM[DD[hhmmss]]]`) | - |
+| `--wayback-timeout <seconds>` | Wayback CDX request timeout | 30 |
+
+Historical URLs are unvalidated *candidates*: getjs does not fetch or execute
+them during discovery, so some may now return `404`. They are merged into the
+discovered set and honour `--filter-domain`/`--exclude-domain`; download-time
+validation drops dead or non-JavaScript responses.
 
 #### Authentication Options
 
@@ -709,6 +730,26 @@ getjs -u https://target.com -o target-js.txt
 # View results
 cat target-js.txt
 ```
+
+### Historical Discovery (Wayback Machine)
+
+```bash
+# Merge historical JS URLs (ever served by the host) with live discovery
+getjs -u https://target.com --wayback -o target-js.txt
+
+# Widen to every subdomain of the registrable domain, bound by date, then
+# download and secret-scan everything that still resolves
+getjs -u https://target.com \
+  --wayback --wayback-domain --wayback-from 2021 \
+  --fetch-all --scan-secrets -d ./js-files
+
+# JSON mode reports a historical summary and candidate count
+getjs -u https://target.com --wayback --json | jq '.[].metadata.historical'
+```
+
+Historical results are candidates, not confirmed live assets. Pair `--wayback`
+with `--fetch-all` to let download-time validation discard dead links and keep
+the JavaScript that is still reachable.
 
 ### Multi-Domain Scanning
 
@@ -1047,17 +1088,25 @@ const {
   JSCollector,
   JSDownloader,
   analyzeDownloadedFiles,
+  fetchHistoricalJsUrls,
   generateOpenAPIFile,
   resolveAISettings,
   scanDownloadedFiles,
 } = require('getjs');
 
 async function main() {
-  // Initialize collector
+  // Optional: query the Wayback Machine directly (no browser required)
+  const { urls: historical } = await fetchHistoricalJsUrls('https://example.com', {
+    includeSubdomains: true,
+  });
+  console.log(`Wayback historical candidates: ${historical.length}`);
+
+  // Initialize collector (pass `wayback` to merge historical URLs into collect())
   const collector = new JSCollector({
     headless: true,
     timeout: 30000,
     verbose: true,
+    wayback: { enabled: true, includeSubdomains: false, limit: 5000 },
   });
 
   try {
@@ -1130,6 +1179,7 @@ main().catch(console.error);
 │  ├── Recursive module/import/worker extraction               │
 │  ├── Scroll-triggered lazy loading                           │
 │  ├── Optional bounded same-origin route crawling             │
+│  ├── Optional Wayback Machine historical JS discovery         │
 │  ├── Explicit entry-point visits and page coverage            │
 │  ├── Same-origin XHR/fetch/SSE/WebSocket API inventory        │
 │  ├── Inline script and server-configuration collection        │
@@ -1181,12 +1231,13 @@ main().catch(console.error);
 9. **Inline Configuration Collection** - Preserves inline scripts, JSON script blocks, and relevant rendered metadata/data attributes for AI review
 10. **Module Extraction** - Parses inline and external bundles with import-map awareness and safety limits
 11. **Service Worker Extraction** - Detects inline registrations and registered workers through Playwright
-12. **Optional Traffic Import** - Adds target-origin HAR or Burp observations to the API inventory
-13. **Normalization** - Converts URLs to absolute form and deduplicates
-14. **Filtering and Downloads** - Applies domain filters before authenticated downloads
-15. **Optional Secret Scan** - Runs TruffleHog against files selected by the current invocation
-16. **Optional AI Analysis** - Copies selected downloads and collection artifacts into a temporary workspace, invokes Codex or Claude with bounded permissions, validates the result, and creates JSON and Markdown reports
-17. **Output** - Returns URLs plus separate page/asset/API coverage and report metadata in JSON mode
+12. **Optional Historical Discovery** - With `--wayback`, queries the Internet Archive CDX API for JavaScript URLs the target has served historically and merges them as candidates
+13. **Optional Traffic Import** - Adds target-origin HAR or Burp observations to the API inventory
+14. **Normalization** - Converts URLs to absolute form and deduplicates
+15. **Filtering and Downloads** - Applies domain filters before authenticated downloads
+16. **Optional Secret Scan** - Runs TruffleHog against files selected by the current invocation
+17. **Optional AI Analysis** - Copies selected downloads and collection artifacts into a temporary workspace, invokes Codex or Claude with bounded permissions, validates the result, and creates JSON and Markdown reports
+18. **Output** - Returns URLs plus separate page/asset/API coverage and report metadata in JSON mode
 
 ## Exit Status
 
@@ -1208,6 +1259,7 @@ main().catch(console.error);
 - **Differential Checks Are Leads** - Status/body-hash differences do not establish intended authorization or vulnerability impact
 - **Computed Chunk Names** - Bundler URLs assembled entirely at runtime may require the corresponding feature to execute
 - **Static Candidates** - Recursive parsing intentionally reports plausible references even when they later return `404`; use `--no-recursive` for runtime-only results
+- **Historical Candidates** - `--wayback` results come from the Internet Archive and are not re-fetched during discovery; some URLs are stale, moved, or removed. Download them (for example with `--fetch-all`) to confirm what is still live. Coverage depends on what the archive crawled, and the public CDX API is rate-limited
 - **Secret Scanner Coverage** - TruffleHog scans downloaded files only; undiscovered chunks and runtime-only configuration remain outside the report
 - **Candidate Quality** - Unverified findings, public identifiers, and false positives require manual review
 - **AI Is Advisory** - Static model output can miss behavior or overstate a lead; validate every finding against the cited source and an authorized target
@@ -1234,8 +1286,8 @@ main().catch(console.error);
 - [x] ~~Explicit application entry points and split page/asset/API coverage~~ ✅ Implemented
 - [x] ~~Inline script and server-rendered configuration analysis~~ ✅ Implemented
 - [x] ~~Session context, role-path flags, and safe authorization differential checks~~ ✅ Implemented
+- [x] ~~Integration with waybackurls for historical JS discovery~~ ✅ Implemented
 - [ ] HAR file export
-- [ ] Integration with waybackurls for historical JS discovery
 
 ## License
 
